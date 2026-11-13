@@ -1,5 +1,6 @@
 # Production stack on the Verda instance (copied to /opt/simsam by CI).
-# Needs /opt/simsam/.env with DOMAIN, DB_PASSWORD and DB_ROOT_PASSWORD; CI sets APP_IMAGE.
+# Needs /opt/simsam/.env with DOMAIN, DB_PASSWORD and DB_ROOT_PASSWORD (and optionally
+# NVIDIA_API_KEY for AI answers); CI sets APP_IMAGE.
 services:
   caddy:
     image: caddy:2
@@ -22,6 +23,14 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: mysql://simsam:${DB_PASSWORD}@db:3306/simsam
+      # Optional: without it the app answers from Wikipedia text only.
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
+      # Optional: read compact briefs aloud with ElevenLabs.
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
+      ELEVENLABS_VOICE_ID: ${ELEVENLABS_VOICE_ID:-}
+      ELEVENLABS_MODEL_ID: ${ELEVENLABS_MODEL_ID:-}
+      ELEVENLABS_STT_MODEL_ID: ${ELEVENLABS_STT_MODEL_ID:-}
+      WIKIPEDIA_USER_AGENT: ${WIKIPEDIA_USER_AGENT:-}
     depends_on:
       db:
         condition: service_healthy

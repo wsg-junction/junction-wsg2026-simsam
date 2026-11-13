@@ -1,5 +1,8 @@
 # MariaDB Wikipedia Challenge
 
+English Wikipedia data fetcher: see [scripts/README.md](scripts/README.md) for
+collecting European history, Finnish history, and computer science articles.
+
 npm workspaces monorepo.
 
 ```
@@ -24,6 +27,17 @@ npm run build
 The API reads `DATABASE_URL` (default `mysql://simsam:simsam@localhost:3306/simsam`)
 and creates its tables on startup.
 
+### AI answers
+
+Answers are written by an NVIDIA-hosted model (OpenAI-compatible API) from the
+Wikipedia articles on each page, with numbered citations. Copy `.env.example` to
+`.env` in the repo root and set `NVIDIA_API_KEY`; the API loads it on start.
+Without a key the app still works and shows Wikipedia text only.
+
+Set `ELEVENLABS_API_KEY` too to have compact briefs read aloud with ElevenLabs
+text to speech (voice and model are configurable, see `.env.example`). The same
+key lets you ask follow-up questions by voice (ElevenLabs Scribe speech to text).
+
 ## Deployment (Verda + GitHub Actions)
 
 On push to `main`, `.github/workflows/ci.yml` builds and tests, builds the Docker
@@ -42,6 +56,9 @@ frontend; Caddy sits in front and serves it over HTTPS at `DOMAIN`.
    # use alphanumeric passwords (they're embedded in a connection URL)
    printf 'DOMAIN=%s\nDB_PASSWORD=%s\nDB_ROOT_PASSWORD=%s\n' app.example.com "$(openssl rand -hex 16)" "$(openssl rand -hex 16)" > /opt/simsam/.env
    chmod 600 /opt/simsam/.env
+   # optional, for AI answers:
+   read -rs -p 'NVIDIA API key: ' KEY && echo "NVIDIA_API_KEY=$KEY" >> /opt/simsam/.env && unset KEY
+   read -rs -p 'ElevenLabs API key: ' KEY && echo "ELEVENLABS_API_KEY=$KEY" >> /opt/simsam/.env && unset KEY
    echo '<SECRET>' | docker login vccr.io/<PROJECT_ID> -u 'vcr-<PROJECT_ID>+<name>' --password-stdin
    ```
 3. **Domain**: at your registrar, add an `A` record for `DOMAIN` → instance public IP,

@@ -1,5 +1,8 @@
 # Caddy obtains and renews the HTTPS certificate for DOMAIN automatically.
 {$DOMAIN} {
 	encode gzip
-	reverse_proxy app:3000
+	reverse_proxy app:3000 {
+		# Pass streamed AI answers through as they're written.
+		flush_interval -1
+	}
 }

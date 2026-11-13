@@ -1,0 +1,310 @@
+@import "tailwindcss";
+@import "@heroui/styles";
+
+/* Tailwind's dark: variant follows the theme class instead of the OS setting. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: "Public Sans Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Newsreader Variable", "Iowan Old Style", Georgia, serif;
+}
+
+/*
+ * Atlas palette. Overrides HeroUI's theme variables (declared in @layer base,
+ * so these unlayered rules win) plus a few chart-specific tokens.
+ */
+:root,
+.light,
+[data-theme="light"] {
+  color-scheme: light;
+  --background: #edf1f4; /* survey sheet */
+  --foreground: #132235; /* ink */
+  --surface: #ffffff;
+  --surface-foreground: var(--foreground);
+  --surface-secondary: #e3e9ee;
+  --surface-tertiary: #d8e0e7;
+  --overlay: #ffffff;
+  --muted: #536477;
+  --default: #dfe6ec;
+  --default-foreground: var(--foreground);
+  --field-background: transparent;
+  --field-foreground: var(--foreground);
+  --field-placeholder: #5f6f81; /* 4.5:1 on the sheet */
+  --field-line: #6f8396; /* 3.4:1, meets non-text contrast */
+  --border: #c6d1db;
+  --separator: #d3dce4;
+  --accent: #8a5a00; /* meridian brass, darkened for contrast on paper */
+  --accent-foreground: #ffffff;
+  --focus: var(--accent);
+  --link: var(--foreground);
+
+  --chart-line: #9fb0c1;
+  --chart-node: #6f8396;
+  --chart-label: #6a7b8d;
+}
+
+.dark,
+[data-theme="dark"] {
+  color-scheme: dark;
+  --background: #0f1b2a; /* abyss */
+  --foreground: #e4ebf2; /* ink */
+  --surface: #16263a; /* plate */
+  --surface-foreground: var(--foreground);
+  --surface-secondary: #1c2f46;
+  --surface-tertiary: #223852;
+  --overlay: #1a2c42;
+  --muted: #8c9db2;
+  --default: #1f3249;
+  --default-foreground: var(--foreground);
+  --field-background: transparent;
+  --field-foreground: var(--foreground);
+  --field-placeholder: #7d8fa5; /* 5.3:1 on abyss */
+  --field-line: #6a7f99; /* 4.2:1, meets non-text contrast */
+  --border: #2b3f58; /* chart line */
+  --separator: #22354c;
+  --accent: #e3b04b; /* meridian brass */
+  --accent-foreground: #1b1404;
+  --focus: var(--accent);
+  --link: var(--foreground);
+
+  --chart-line: #2f4561;
+  --chart-node: #4d6583;
+  --chart-label: #5f7590;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------- Question input: a chart line, not a boxed field ---------- */
+
+.question-input,
+.question-input:hover,
+.question-input:focus,
+.question-input[data-hovered="true"],
+.question-input[data-focused="true"] {
+  background: var(--background);
+  box-shadow: none;
+  border: 0;
+  border-bottom: 1px solid var(--field-line);
+  border-radius: 0;
+  padding: 0 0 0.75rem;
+  height: auto;
+}
+
+.question-input:focus,
+.question-input[data-focused="true"] {
+  border-bottom: 2px solid var(--accent);
+  padding-bottom: calc(0.75rem - 1px);
+}
+
+/* ---------- Survey lines (backdrop + topic graph) ---------- */
+
+.survey-line {
+  stroke: var(--chart-line);
+  stroke-width: 1; /* graph is drawn in px; backdrop overrides below */
+  fill: none;
+}
+
+.survey-line--active {
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+
+.backdrop .survey-line {
+  stroke-width: 0.12;
+}
+
+.survey-node {
+  fill: var(--background);
+  stroke: var(--chart-node);
+  stroke-width: 0.12;
+}
+
+.survey-label {
+  fill: var(--chart-label);
+  font-family: var(--font-serif);
+  font-style: italic;
+}
+
+/* ---------- Topic map ---------- */
+
+/* One ring per step away from the center. */
+.graph-ring {
+  fill: none;
+  stroke: var(--chart-line);
+  stroke-width: 1;
+  opacity: 0.45;
+}
+
+.graph-edge--cross {
+  opacity: 0.55;
+}
+
+.graph-dot {
+  fill: var(--background);
+  stroke: var(--field-line);
+  stroke-width: 1.5;
+  transition: fill 150ms, stroke 150ms;
+}
+
+.graph-node:hover .graph-dot,
+.graph-dot--route {
+  stroke: var(--accent);
+}
+
+.graph-dot--center {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+.graph-dot--selected {
+  fill: var(--accent);
+  stroke: var(--accent);
+}
+
+.graph-node {
+  outline: none;
+}
+
+.graph-node:focus-visible .graph-dot {
+  stroke: var(--focus);
+  stroke-width: 3;
+}
+
+/* Labels sit on a halo of the background so lines never run through text. */
+.graph-label {
+  fill: var(--muted);
+  stroke: var(--background);
+  stroke-linejoin: round;
+  paint-order: stroke;
+  font-family: var(--font-sans);
+  pointer-events: none;
+}
+
+.graph-label--strong,
+.graph-node:focus-visible .graph-label {
+  fill: var(--foreground);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.graph-label--center {
+  fill: var(--foreground);
+  font-family: var(--font-serif);
+}
+
+/*
+ * A cleared patch of the chart behind the opening content, like a map's
+ * cartouche: solid background with a feathered edge so no line crosses text.
+ */
+.cartouche {
+  background: var(--background);
+  box-shadow: 0 0 2.5rem 2rem var(--background);
+}
+
+/* Fade the backdrop out where the opening content sits. */
+.backdrop--opening {
+  mask-image: linear-gradient(100deg, rgb(0 0 0 / 0.12) 0%, rgb(0 0 0 / 0.25) 45%, #000 80%);
+}
+
+/* ---------- Compact briefs: beats revealed one at a time ---------- */
+
+.beat[data-beat="hidden"] {
+  visibility: hidden;
+  opacity: 0;
+}
+
+/* ---------- Motion (all of it opts out under reduced motion) ---------- */
+
+@media (prefers-reduced-motion: no-preference) {
+  /* Lines draw themselves in once: pathLength="1" on each line. */
+  .draw-in {
+    stroke-dasharray: 1;
+    stroke-dashoffset: 1;
+    animation: draw 1100ms cubic-bezier(0.3, 0.7, 0.2, 1) forwards;
+    animation-delay: calc(var(--i, 0) * 28ms + 120ms);
+  }
+
+  .marker-in {
+    opacity: 0;
+    animation: marker 420ms ease-out forwards;
+    animation-delay: calc(var(--i, 0) * 45ms + 260ms);
+  }
+
+  /* A beat rises into place as it's reached; its rail line draws down after it. */
+  .beat[data-beat="shown"],
+  .beat[data-beat="current"] {
+    animation: beat-in 650ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  }
+
+  .beat:not([data-beat="hidden"]) .rail {
+    transform-origin: top;
+    animation: rail-in 900ms 250ms cubic-bezier(0.3, 0.7, 0.2, 1) both;
+  }
+
+  .node-in {
+    animation: node-in 500ms ease-out both;
+  }
+
+  /* View transition between the opening screen and a graph. */
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation-duration: 260ms;
+    animation-timing-function: ease-out;
+  }
+
+  ::view-transition-group(question) {
+    animation-duration: 420ms;
+    animation-timing-function: cubic-bezier(0.3, 0.7, 0.2, 1);
+  }
+}
+
+@keyframes draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes beat-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+}
+
+@keyframes rail-in {
+  from {
+    transform: scaleY(0);
+  }
+}
+
+@keyframes node-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes marker {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.85);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+.question-transition {
+  view-transition-name: question;
+}

@@ -1,4 +1,4 @@
-# simsam
+# MariaDB Wikipedia Challenge
 
 npm workspaces monorepo.
 

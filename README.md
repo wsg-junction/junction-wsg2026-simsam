@@ -24,7 +24,7 @@ npm run build
 The API reads `DATABASE_URL` (default `mysql://simsam:simsam@localhost:3306/simsam`)
 and creates its tables on startup.
 
-## Deployment (Verda + CRACI)
+## Deployment (Verda + GitHub Actions)
 
 On push to `main`, `.github/workflows/ci.yml` builds and tests, builds the Docker
 image, pushes it to Verda's registry (`vccr.io`), then SSHes into a Verda instance
@@ -33,9 +33,8 @@ frontend; Caddy sits in front and serves it over HTTPS at `DOMAIN`.
 
 ### One-time setup
 
-1. **CRACI**: install the CRACI GitHub App (CRACI → Settings → Builds → Install GitHub App).
-2. **Verda registry**: create registry credentials (Container Registry → Credentials).
-3. **Verda instance**: create a CPU instance with an SSH key, then on it:
+1. **Verda registry**: create registry credentials (Container Registry → Credentials).
+2. **Verda instance**: create a CPU instance with an SSH key, then on it:
    ```sh
    # install Docker if the image doesn't include it
    curl -fsSL https://get.docker.com | sh && sudo usermod -aG docker $USER
@@ -45,10 +44,10 @@ frontend; Caddy sits in front and serves it over HTTPS at `DOMAIN`.
    chmod 600 /opt/simsam/.env
    echo '<SECRET>' | docker login vccr.io/<PROJECT_ID> -u 'vcr-<PROJECT_ID>+<name>' --password-stdin
    ```
-4. **Domain**: at your registrar, add an `A` record for `DOMAIN` → instance public IP,
+3. **Domain**: at your registrar, add an `A` record for `DOMAIN` → instance public IP,
    and make sure ports 80 and 443 are open on the instance. Caddy issues the
    certificate on first start once DNS resolves.
-5. **GitHub repo settings** (Settings → Secrets and variables → Actions):
+4. **GitHub repo settings** (Settings → Secrets and variables → Actions):
 
    | Kind     | Name                    | Value                                             |
    |----------|-------------------------|---------------------------------------------------|

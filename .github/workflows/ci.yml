@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: craci
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -23,18 +23,13 @@ jobs:
   deploy:
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: craci
+    runs-on: ubuntu-latest
     concurrency: deploy
     env:
       REGISTRY: vccr.io/${{ vars.VERDA_PROJECT_ID }}
       IMAGE: vccr.io/${{ vars.VERDA_PROJECT_ID }}/simsam:${{ github.sha }}
       DEPLOY_TARGET: ${{ vars.DEPLOY_USER }}@${{ vars.DEPLOY_HOST }}
     steps:
-      # Full GitHub-style image so Docker and ssh are available.
-      - uses: cracicorp/setup@v1
-        with:
-          image: ubuntu-24.04
-
       - uses: actions/checkout@v4
 
       - name: Build and push image

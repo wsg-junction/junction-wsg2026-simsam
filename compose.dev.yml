@@ -1,0 +1,16 @@
+# Local development database: docker compose -f compose.dev.yml up -d
+services:
+  db:
+    image: mariadb:11.8
+    environment:
+      MARIADB_DATABASE: simsam
+      MARIADB_USER: simsam
+      MARIADB_PASSWORD: simsam
+      MARIADB_ROOT_PASSWORD: root
+    ports:
+      - "3306:3306"
+    volumes:
+      - db-data:/var/lib/mysql
+
+volumes:
+  db-data:

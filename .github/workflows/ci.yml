@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: craci
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+
+  deploy:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: craci
+    concurrency: deploy
+    env:
+      REGISTRY: vccr.io/${{ vars.VERDA_PROJECT_ID }}
+      IMAGE: vccr.io/${{ vars.VERDA_PROJECT_ID }}/simsam:${{ github.sha }}
+      DEPLOY_TARGET: ${{ vars.DEPLOY_USER }}@${{ vars.DEPLOY_HOST }}
+    steps:
+      # Full GitHub-style image so Docker and ssh are available.
+      - uses: cracicorp/setup@v1
+        with:
+          image: ubuntu-24.04
+
+      - uses: actions/checkout@v4
+
+      - name: Build and push image
+        env:
+          REGISTRY_USER: ${{ secrets.VERDA_REGISTRY_USER }}
+          REGISTRY_SECRET: ${{ secrets.VERDA_REGISTRY_SECRET }}
+        run: |
+          echo "$REGISTRY_SECRET" | docker login "$REGISTRY" -u "$REGISTRY_USER" --password-stdin
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+
+      - name: Set up SSH
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/id_ed25519
+          echo "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519
+
+      - name: Deploy to Verda instance
+        run: |
+          scp deploy/compose.yml deploy/Caddyfile "$DEPLOY_TARGET:/opt/simsam/"
+          ssh "$DEPLOY_TARGET" "cd /opt/simsam \
+            && sed -i '/^APP_IMAGE=/d' .env \
+            && echo 'APP_IMAGE=$IMAGE' >> .env \
+            && docker compose pull app \
+            && docker compose up -d \
+            && docker image prune -f"

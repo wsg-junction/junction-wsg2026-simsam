@@ -4,6 +4,11 @@ export interface Health {
 }
 
 export interface Item {
-  id: string;
+  id: number;
+  name: string;
+  createdAt: string;
+}
+
+export interface NewItem {
   name: string;
 }

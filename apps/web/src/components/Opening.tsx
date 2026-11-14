@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Button, Form, Input, TextField } from '@heroui/react';
+import { serverFeatures } from '../lib/ai';
 import { useVoiceControls, VoiceButtons, VoiceStatusRows } from './VoiceControls';
 
 const EXAMPLES = [
@@ -9,8 +10,16 @@ const EXAMPLES = [
   'Why did the Hanseatic League decline?',
 ];
 
-export function Opening({ onExplore }: { onExplore: (question: string) => void }) {
+export function Opening({ onExplore }: { onExplore: (question: string, deep?: boolean) => void }) {
   const [question, setQuestion] = useState('');
+  const [deepOn, setDeepOn] = useState(false);
+  useEffect(() => {
+    let live = true;
+    serverFeatures().then((h) => live && setDeepOn(h?.deep === true));
+    return () => {
+      live = false;
+    };
+  }, []);
   // Spoken questions start an exploration straight away, like pressing Explore.
   const voice = useVoiceControls(onExplore);
 
@@ -52,12 +61,24 @@ export function Opening({ onExplore }: { onExplore: (question: string) => void }
             <Button type="submit" size="lg" className="shrink-0">
               Explore
             </Button>
+            {deepOn && (
+              <Button
+                size="lg"
+                variant="secondary"
+                className="shrink-0"
+                isDisabled={!question.trim()}
+                onPress={() => question.trim() && onExplore(question.trim(), true)}
+              >
+                Deep research
+              </Button>
+            )}
           </div>
         </Form>
         <VoiceStatusRows controls={voice} rowClassName="mt-4" />
 
         <p className="mt-3 text-sm text-muted">
           Answers are mapped from Wikipedia articles, with every passage linked to its source.
+          {deepOn && ' Deep research writes a full report on a topic, with a timeline, parts, figures and sources.'}
         </p>
 
         <div className="mt-14">

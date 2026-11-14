@@ -1,7 +1,9 @@
 import type { ChatEntry } from '../components/ChatCenter';
 import type { ContextEntry } from '../components/ContextPanel';
+import type { FactCheckState } from '../components/FactCheckPanel';
 import type { GraphState } from '../components/GraphPanel';
 import type { TimelineState } from '../components/HistoryPanel';
+import type { DeepReport } from '@simsam/models';
 import type { PageAnswer, PageBrief, ResearchPage } from './research';
 
 /**
@@ -18,11 +20,21 @@ export interface ExplorationSnapshot {
   graphs: Record<string, GraphState>;
   contexts: Record<string, ContextEntry[]>;
   timelines: Record<string, TimelineState>;
+  /** Fact-checks by article title (absent in saves from before the fact-checker). */
+  factChecks?: Record<string, FactCheckState>;
+  /** Finished deep research reports (absent in older saves). */
+  reports?: DeepReport[];
+  /** Which main tab was open. */
+  mainTab?: 'pages' | 'deep';
   /** The page that was in view. */
   active: number;
 }
 
-export interface ExplorationState extends Omit<ExplorationSnapshot, 'version'> {}
+export interface ExplorationState extends Omit<ExplorationSnapshot, 'version' | 'factChecks' | 'reports' | 'mainTab'> {
+  factChecks: Record<string, FactCheckState>;
+  reports: DeepReport[];
+  mainTab: 'pages' | 'deep';
+}
 
 export function takeSnapshot(s: ExplorationState): ExplorationSnapshot {
   const keep = <T>(record: Record<string, T>, done: (v: T) => boolean) =>
@@ -42,6 +54,9 @@ export function takeSnapshot(s: ExplorationState): ExplorationSnapshot {
         .filter(([, list]) => list.length > 0),
     ),
     timelines: keep(s.timelines, (t) => t.status === 'ready' || t.status === 'unavailable'),
+    factChecks: keep(s.factChecks, (c) => c.status === 'ready' || c.status === 'missing'),
+    reports: s.reports,
+    mainTab: s.mainTab,
     active: s.active,
   };
 }
@@ -64,5 +79,7 @@ export function contentSignature(s: ExplorationState) {
     Object.keys(snap.graphs).length,
     Object.values(snap.contexts).reduce((n, l) => n + l.length, 0),
     Object.keys(snap.timelines).length,
+    Object.keys(snap.factChecks ?? {}).length,
+    (snap.reports ?? []).map((r) => r.id).join(','),
   ].join('|');
 }

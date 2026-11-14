@@ -25,8 +25,23 @@ import type {
   SourcePlan,
   ContextRequest,
   ContextResponse,
+  DeepReportEvent,
+  DeepReportRequest,
+  FactCheckReport,
+  FactCheckRequest,
 } from '@simsam/models';
-import { aiEnabled, createBrief, planSources, rewriteQuery, routeQuestion, streamAnswer, summarizeContext } from './ai.js';
+import {
+  aiEnabled,
+  aiEndpoint,
+  createBrief,
+  planSources,
+  rewriteQuery,
+  routeQuestion,
+  streamAnswer,
+  summarizeContext,
+} from './ai.js';
+import { deepReport } from './report.js';
+import { factCheck, factCheckEnabled, GEMINI_MODEL, WikipediaBusyError } from './factcheck.js';
 import { searchWeb, webSearchEnabled } from './context.js';
 import { corpusArticles, corpusAvailable, corpusGraph, type CorpusGraph, relatedInCorpus, searchCorpus, type CorpusArticle, type CorpusHit, type RankedHit, type SearchCandidate } from './corpus.js';
 import { articleHistory } from './history.js';
@@ -102,6 +117,10 @@ const app = Fastify({ logger: true, trustProxy: true });
 await app.register(cors);
 await app.register(rateLimit, { global: false });
 await migrate();
+app.log.info({ model: aiEnabled ? aiEndpoint : 'off', factcheck: factCheckEnabled ? GEMINI_MODEL : 'off' }, 'AI endpoints');
+
+/** Deep research reads the MariaDB collection, so it needs both the AI and the corpus. */
+const deepAvailable = async () => aiEnabled && (await corpusAvailable());
 
 app.get('/api/health', async (): Promise<Health> => ({
   status: 'ok',
@@ -110,6 +129,8 @@ app.get('/api/health', async (): Promise<Health> => ({
   voice: speechEnabled,
   corpus: await corpusAvailable(),
   web: webSearchEnabled,
+  deep: await deepAvailable(),
+  factcheck: factCheckEnabled,
 }));
 
 // ---------- Speech (ElevenLabs) ----------
@@ -544,6 +565,89 @@ app.post<{ Body: AnswerRequest }>(
     }
     reply.raw.end();
     return reply;
+  },
+);
+
+// Deep research: a topic researched in depth into a full report (report.ts):
+// plan, evidence per part from MariaDB (passages, figures), live Wikipedia and
+// optionally the web, parts written from their evidence, then the synthesis.
+// Progress and the finished report stream as server-sent events.
+app.post<{ Body: DeepReportRequest }>(
+  '/api/deep-report',
+  {
+    // A run makes a dozen model calls (and web searches when asked).
+    config: { rateLimit: { max: 4, timeWindow: '1 minute' } },
+    schema: {
+      body: {
+        type: 'object',
+        required: ['topic', 'web'],
+        additionalProperties: false,
+        properties: {
+          topic: { type: 'string', minLength: 1, maxLength: 300 },
+          web: { type: 'boolean' },
+        },
+      },
+    },
+  },
+  async (req, reply) => {
+    if (!(await deepAvailable())) return reply.code(503).send({ error: 'Deep research is not available' });
+    const controller = new AbortController();
+    reply.raw.on('close', () => controller.abort());
+    const timeout = setTimeout(() => controller.abort(), 12 * 60_000);
+    reply.raw.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      'X-Accel-Buffering': 'no',
+    });
+    const send = (event: DeepReportEvent) => reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+    // Comments keep proxies from closing a quiet stream while a part is being written.
+    const keepAlive = setInterval(() => reply.raw.write(': working\n\n'), 15_000);
+    try {
+      for await (const event of deepReport(req.body.topic.trim(), req.body.web, controller.signal)) send(event);
+    } catch (err) {
+      if (!reply.raw.destroyed) {
+        req.log.error(err, 'deep report failed');
+        send({ type: 'error', message: 'The research couldn’t be finished right now.' });
+      }
+    } finally {
+      clearTimeout(timeout);
+      clearInterval(keepAlive);
+    }
+    reply.raw.end();
+    return reply;
+  },
+);
+
+// The fact-checker: the claims in an article's lead, checked against the web by
+// Gemini with Google Search. Only the article's text is sent. Stored per
+// revision in fact_checks and reused until the article changes.
+app.post<{ Body: FactCheckRequest }>(
+  '/api/fact-check',
+  {
+    // Each new check costs several grounded Gemini calls; stored ones are free.
+    config: { rateLimit: { max: 10, timeWindow: '1 minute' } },
+    schema: {
+      body: {
+        type: 'object',
+        required: ['title'],
+        additionalProperties: false,
+        properties: { title: { type: 'string', minLength: 1, maxLength: 255 } },
+      },
+    },
+  },
+  async (req, reply): Promise<FactCheckReport | void> => {
+    if (!factCheckEnabled) return reply.code(503).send({ error: 'Fact-checking is not configured' });
+    try {
+      const report = await factCheck(req.body.title, AbortSignal.timeout(180_000));
+      if (!report) return reply.code(404).send({ error: 'No Wikipedia article has this title.' });
+      return report;
+    } catch (err) {
+      req.log.warn(err, 'fact check failed');
+      if (err instanceof WikipediaBusyError) {
+        return reply.code(503).send({ error: 'Wikipedia is limiting requests right now, so the article couldn’t be read. Try again in a minute.' });
+      }
+      return reply.code(502).send({ error: 'The claims couldn’t be checked right now.' });
+    }
   },
 );
 

@@ -4,7 +4,9 @@
 // callers can fall back to the live Wikipedia API.
 import type { RowDataPacket } from 'mysql2/promise';
 import { pool } from './db.js';
+import type { MediaKind } from '@simsam/models';
 import { embedCached, EmbeddingRejectedError, embeddingsEnabled, vectorText } from './embeddings.js';
+import { figureSnippet, nearestFigures } from './media.js';
 
 /** Cosine distance above which a passage isn't considered relevant at all. */
 const MAX_DISTANCE = 0.68;
@@ -15,6 +17,8 @@ export interface CorpusHit {
   snippet: string;
   /** Cosine distance of the best-matching passage (lower is closer). */
   distance: number;
+  /** Set when the best match is one of the article's figures (a chart, map, infobox or table) rather than its prose. */
+  figure?: { kind: MediaKind; caption: string | null; imageUrl: string | null };
 }
 
 let available: Promise<boolean> | null = null;
@@ -93,6 +97,8 @@ export interface RankedHit {
   titleMatch: boolean;
   /** Stored in MariaDB with embeddings (its text comes from the corpus). */
   stored: boolean;
+  /** The best match is one of its figures. */
+  figure?: CorpusHit['figure'];
 }
 
 /** Stored articles get a small edge over equally close live ones: their full text is local. */
@@ -136,7 +142,19 @@ export async function searchCorpus(query: string, limit: number, candidates: Sea
       titlesNamedIn(query),
     ]);
     if (!vector) return [];
-    const hits = await nearestArticles(vector, limit * 2);
+    const [hits, figures] = await Promise.all([
+      nearestArticles(vector, limit * 2),
+      // What charts, maps, infoboxes and tables show (article_media), next to the prose.
+      nearestFigures(vector, limit * 2).catch(() => []),
+    ]);
+    for (const fig of figures) {
+      const distance = fig.distance ?? 1;
+      if (distance > MAX_DISTANCE) continue;
+      const figure = { kind: fig.kind, caption: fig.caption, imageUrl: fig.imageUrl };
+      const hit = hits.find((h) => h.pageId === fig.pageId);
+      if (!hit) hits.push({ title: fig.title, pageId: fig.pageId, snippet: figureSnippet(fig), distance, figure });
+      else if (distance < hit.distance) Object.assign(hit, { distance, snippet: figureSnippet(fig), figure });
+    }
     const has = (title: string) => hits.some((h) => h.title.toLowerCase() === title.toLowerCase());
 
     // Named or live-found articles that are stored but weren't among the nearest: measure their passages.
@@ -447,4 +465,42 @@ async function buildCorpusGraph(title: string, seeds: string[], about: string): 
     edges,
     depth: GRAPH_DEPTH,
   };
+}
+
+// ---------- Passages (deep research reports) ----------
+
+export interface Passage {
+  chunkId: number;
+  pageId: number;
+  title: string;
+  url: string;
+  section: string | null;
+  content: string;
+  distance: number;
+}
+
+/**
+ * The passages nearest to a vector (vector index), at most `perArticle` from
+ * any one article, so the evidence for a question comes from several articles.
+ */
+export async function nearestPassages(vector: number[], limit: number, perArticle = 2, maxDistance = 0.6): Promise<Passage[]> {
+  const v = vectorText(vector);
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT c.id, c.page_id, a.title, a.url, c.section, c.content, VEC_DISTANCE_COSINE(c.embedding, VEC_FromText(?)) AS distance
+     FROM article_chunks c JOIN articles a USING (page_id)
+     ORDER BY VEC_DISTANCE_COSINE(c.embedding, VEC_FromText(?))
+     LIMIT ?`,
+    [v, v, limit * 5],
+  );
+  const perPage = new Map<number, number>();
+  const out: Passage[] = [];
+  for (const r of rows) {
+    const distance = Number(r.distance);
+    const pageId = Number(r.page_id);
+    if (distance > maxDistance || (perPage.get(pageId) ?? 0) >= perArticle) continue;
+    perPage.set(pageId, (perPage.get(pageId) ?? 0) + 1);
+    out.push({ chunkId: Number(r.id), pageId, title: r.title, url: r.url, section: r.section ?? null, content: r.content, distance });
+    if (out.length >= limit) break;
+  }
+  return out;
 }

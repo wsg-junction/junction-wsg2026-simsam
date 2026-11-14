@@ -60,6 +60,8 @@ raw hex in components.
 | `--chart-line` / `--chart-node` / `--chart-label` | `#9fb0c1` / `#6f8396` / `#6a7b8d` | `#2f4561` / `#4d6583` / `#5f7590` | backdrop and map lines, nodes, labels |
 | `--added` / `--added-bg` / `--added-fg` | `#2f7d4f` / `#e1f1e6` / `#1c4f31` | `#5cc489` / `#183a2a` / `#b5ecc8` | text added (history) |
 | `--removed` / `--removed-bg` / `--removed-fg` | `#b4473f` / `#f8e1df` / `#7a2620` | `#ef8a80` / `#47212a` / `#f6c1bb` | text removed (history) |
+| `--chart-bar` | `#3d6a96` | `#7fa9d6` | data bars in deep research reports (single series) |
+| `--verdict-partly` / `--verdict-partly-bg` | `#a85d12` / `#f6e6d3` | `#f0a35e` / `#3f2c17` | fact-check "partly confirmed" (confirmed reuses `--added`, contradicted `--removed`, not found `--muted`) |
 
 Rules:
 - **Contrast**: text meets WCAG AA; non-text UI (field lines, dots) meets 3:1.
@@ -68,6 +70,11 @@ Rules:
   strikethrough on removals and screen-reader "[added: …]" text; chart marks use
   shape (filled = more added, hollow ring = more removed).
 - **Status dots** on tabs use the accent (pulsing while loading, steady when ready).
+- **Fact-check verdicts are never color-only**: each has its own icon (check,
+  half circle, cross, question mark) and a text label; the colored icon sits next
+  to label text in the foreground color. The comparison highlights differing words
+  with `<mark>` (Wikipedia's own words in the removed tint, the web's in the added
+  tint) plus screen-reader "[Only in Wikipedia: …]" text.
 
 ## Themes
 
@@ -147,7 +154,7 @@ and quoted edit summaries.
   alerts, themed by our tokens. Primary actions use the default (brass) button;
   secondary use `variant="secondary"`; icon-only controls use `variant="ghost"`
   and always have an `aria-label`.
-- **Segmented controls** (Detailed|Compact, panel tabs, Auto|Articles|Context): a
+- **Segmented controls** (Pages|Deep research, Detailed|Compact, panel tabs, Auto|Articles|Context): a
   `rounded-full bg-default p-0.5` track with the active option as a raised
   `bg-background` pill. Use `aria-pressed` (toggles) or `role="radio"` (choices).
 - **Question input** on the opening screen is a chart line, not a box: a 1px
@@ -169,6 +176,20 @@ and quoted edit summaries.
   status in plain words ("Reading the edit history. The first time takes a few
   seconds."). Errors say what happened and offer "Try again".
 - **Empty states** explain what will appear and how to get it.
+- **Deep research report**: a document, not cards. A sticky contents list on
+  wide screens (xl), sections separated by rules with small semibold headings;
+  each part is a "page" with "Part n of N", a serif title, its focus, a serif
+  summary, key facts as small bordered tiles, sections in serif reading type,
+  a data chart after the first section, and figures in a two-column grid
+  (image on white, or the table/infobox itself, caption, "read from the image
+  by AI" details). Progress shows the plan with a dot per part (hollow waiting,
+  pulsing brass working, solid brass written).
+- **Timeline explorer**: neutral marks (no categorical colors): one lane per part
+  with its name, eras as alternating surface bands on top, dots sized by
+  importance (turning points in foreground ink), spans as thin bars, the selected
+  event in brass with a ring. Labels in two rows per lane, placed by importance
+  without overlap; details (importance 3) appear when zoomed under half the span.
+  It opens on the core period; "Show all" for the whole range.
 
 ## Data visualization
 
@@ -252,6 +273,10 @@ Easing for entrances: `cubic-bezier(0.3, 0.7, 0.2, 1)`. JS checks
 | Collapsed side panel shows one button per tab + Alt shortcuts | direct access to each panel |
 | History lists only substantial changes, with diffs | trust: people can verify each claim quickly |
 | Dark theme by default, brass accent, serif reading type | the chart identity |
+| Deep research is a main tab with a full report, not a chat mode | the user wanted research that comes close to a scientific study: parts, timeline, figures, references |
+| Report data charts use `--chart-bar`, one hue, values written out | single series; direct labels make it its own table |
+| Fact-check is its own side panel, loaded only when opened | web verdicts stay apart from the page; each new check costs several searches |
+| Fact-check shows Wikipedia and web wording as two lines, not one merged diff | easier to read which side says what |
 
 ## Housekeeping
 

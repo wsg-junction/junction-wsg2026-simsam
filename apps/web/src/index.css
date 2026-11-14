@@ -49,6 +49,12 @@
   --removed: #b4473f;
   --removed-bg: #f8e1df;
   --removed-fg: #7a2620;
+
+  --chart-bar: #3d6a96; /* data bars in reports, 5.6:1 on white */
+
+  /* Fact-check verdicts (always shown with an icon and a label too). */
+  --verdict-partly: #a85d12;
+  --verdict-partly-bg: #f6e6d3;
 }
 
 .dark,
@@ -85,6 +91,10 @@
   --removed: #ef8a80;
   --removed-bg: #47212a;
   --removed-fg: #f6c1bb;
+
+  --chart-bar: #7fa9d6;
+  --verdict-partly: #f0a35e;
+  --verdict-partly-bg: #3f2c17;
 }
 
 html,

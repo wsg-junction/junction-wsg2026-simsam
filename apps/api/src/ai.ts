@@ -1,16 +1,34 @@
 import OpenAI from 'openai';
 import type { ChatCompletionCreateParams, ChatCompletionMessageParam } from 'openai/resources/chat/completions';
-import type { AnswerEvent, Brief, BriefEvent, BriefPoint, PriorTurn, SourcePlan, WebSource } from '@simsam/models';
+import type {
+  AnswerEvent,
+  Brief,
+  BriefEvent,
+  BriefPoint,
+  PriorTurn,
+  RouteResponse,
+  SourcePlan,
+  WebSource,
+} from '@simsam/models';
 import { webSearchEnabled } from './context.js';
 import { fetchIntros } from './wikipedia.js';
 
-// NVIDIA's hosted models speak the OpenAI chat completions API.
+// NVIDIA's hosted models speak the OpenAI chat completions API. NVIDIA_BASE_URL
+// points the chat model at another OpenAI-compatible server instead, e.g.
+// Nemotron served with vLLM or NIM on a Verda GPU instance
+// ("http://<instance>:8000/v1"). Unset, the NVIDIA API catalog is used.
+// Embeddings stay on the catalog either way (see embeddings.ts).
 const apiKey = process.env.NVIDIA_API_KEY;
+const baseURL = process.env.NVIDIA_BASE_URL?.trim() || 'https://integrate.api.nvidia.com/v1';
+const selfHosted = Boolean(process.env.NVIDIA_BASE_URL?.trim());
 const MODEL = process.env.NVIDIA_MODEL ?? 'nvidia/nemotron-3.5-super-vl-120b-a12b';
 
-const client = apiKey ? new OpenAI({ apiKey, baseURL: 'https://integrate.api.nvidia.com/v1' }) : null;
+// A self-hosted server may not check keys; the SDK still needs a string.
+const client = apiKey || selfHosted ? new OpenAI({ apiKey: apiKey || 'not-needed', baseURL }) : null;
 
 export const aiEnabled = client !== null;
+/** For the logs: where the chat model runs. */
+export const aiEndpoint = selfHosted ? new URL(baseURL).host : 'NVIDIA API catalog';
 
 const ANSWER_SYSTEM = `You are Atlas, a research assistant that answers questions from numbered Wikipedia excerpts.
 
@@ -469,7 +487,7 @@ export async function routeQuestion(
   topic: string | undefined,
   history: PriorTurn[],
   signal?: AbortSignal,
-): Promise<{ route: 'articles' | 'context'; query: string | null }> {
+): Promise<RouteResponse> {
   if (!client) throw new Error('AI is not configured');
   const params: NvidiaParams<ChatCompletionCreateParams> = {
     model: MODEL,
@@ -506,4 +524,122 @@ export async function routeQuestion(
     return { route: 'context', query };
   }
   return { route: 'articles', query: null };
+}
+
+// ---------- Figures (vision) ----------
+
+const FIGURE_SYSTEM = `You read figures from Wikipedia articles for a search index, so that questions about what a figure shows can be answered without seeing it. Reply with JSON only:
+
+{"kind": "chart" | "map" | "diagram" | "photo", "text": string}
+
+- chart (graphs, plots, timelines with data): its title, axes and units, the series, and the key values read off it, as compact "label: value" lines. Give numbers as precisely as the figure allows.
+- map: the area and period shown, what is marked (regions, borders, fronts, movements, places) and the legend.
+- diagram: its parts and what it explains.
+- photo: one sentence on what it shows.
+- Write only what is visible or stated in the caption. Plain text, at most 180 words.`;
+
+export const VISION_MODEL = MODEL;
+
+/** What a figure shows, read once by the vision model (the result is stored in article_media). */
+export async function readFigure(image: { dataUrl: string; caption: string; article: string }, signal?: AbortSignal) {
+  if (!client) throw new Error('AI is not configured');
+  const params: NvidiaParams<ChatCompletionCreateParams> = {
+    model: MODEL,
+    messages: [
+      { role: 'system', content: FIGURE_SYSTEM },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: `Article: ${image.article}\nCaption: ${image.caption || '(none)'}\n\nJSON:` },
+          { type: 'image_url', image_url: { url: image.dataUrl } },
+        ],
+      },
+    ],
+    temperature: 0.1,
+    max_tokens: 700,
+    stream: false,
+    chat_template_kwargs: { enable_thinking: false },
+  };
+  const completion = await client.chat.completions.create(params as ChatCompletionCreateParams & { stream: false }, {
+    signal,
+  });
+  const content = completion.choices[0]?.message?.content ?? '';
+  let parsed: { kind?: unknown; text?: unknown } = {};
+  try {
+    parsed = JSON.parse(content.slice(content.indexOf('{'), content.lastIndexOf('}') + 1));
+  } catch {
+    // Plain text instead of JSON: keep it as the description.
+    parsed = { text: content };
+  }
+  const kinds = ['chart', 'map', 'diagram', 'photo'] as const;
+  const kind = kinds.find((k) => k === parsed.kind) ?? 'photo';
+  const text = typeof parsed.text === 'string' ? parsed.text.replace(/\s+\n/g, '\n').trim().slice(0, 2000) : '';
+  return text ? { kind, text } : null;
+}
+
+
+// ---------- JSON completions (deep research reports) ----------
+
+export const CHAT_MODEL = MODEL;
+
+/** Whether the server accepted a JSON schema (structured output); turned off after it refuses one. */
+let schemasAccepted = true;
+
+/**
+ * A JSON reply from the chat model, parsed. With `schema`, the server is asked
+ * to decode to that JSON schema (structured output, supported by NVIDIA's API,
+ * NIM and vLLM), so the reply is always valid JSON; a server that refuses it
+ * gets the plain request. Retries once when the reply can't be parsed.
+ */
+export async function jsonCompletion<T>(
+  system: string,
+  user: string,
+  options: { maxTokens: number; temperature?: number; signal?: AbortSignal; schema?: { name: string; schema: object } },
+): Promise<T> {
+  if (!client) throw new Error('AI is not configured');
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const structured = Boolean(options.schema) && schemasAccepted;
+    const params: NvidiaParams<ChatCompletionCreateParams> = {
+      ...(structured ? { response_format: { type: 'json_schema' as const, json_schema: { name: options.schema!.name, schema: options.schema!.schema as Record<string, unknown> } } } : {}),
+      model: MODEL,
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+      temperature: options.temperature ?? 0.3,
+      max_tokens: options.maxTokens,
+      stream: false,
+      chat_template_kwargs: { enable_thinking: false },
+    };
+    let completion;
+    try {
+      completion = await client.chat.completions.create(params as ChatCompletionCreateParams & { stream: false }, {
+        signal: options.signal,
+      });
+    } catch (err) {
+      // A server without structured output: ask again without the schema.
+      if (structured && (err as { status?: number }).status === 400 && !options.signal?.aborted) {
+        schemasAccepted = false;
+        attempt--;
+        continue;
+      }
+      throw err;
+    }
+    const content = completion.choices[0]?.message?.content ?? '';
+    const json = content
+      .slice(content.indexOf('{'), content.lastIndexOf('}') + 1)
+      // Citation-style source lists ("[1][3]") where a JSON array belongs.
+      .replace(/("(?:sources|figures|evidence)"\s*:\s*)((?:\[[\d\s,]*\]\s*)+)/g, (_, key: string, arrays: string) => {
+        const nums = arrays.match(/\d+/g) ?? [];
+        return `${key}[${nums.join(', ')}]`;
+      });
+    try {
+      return JSON.parse(json) as T;
+    } catch (err) {
+      lastError = err;
+      if (options.signal?.aborted) break;
+    }
+  }
+  throw new Error(`The model's JSON couldn't be read: ${(lastError as Error)?.message}`);
 }

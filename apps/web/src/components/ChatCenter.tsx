@@ -49,7 +49,12 @@ interface LogProps {
 export function ChatLog({ entries, ...actions }: LogProps) {
   const end = useRef<HTMLLIElement>(null);
   const last = entries[entries.length - 1];
-  const lastText = last?.status === 'done' ? last.answer && 'text' in last.answer ? last.answer.text : last.reply : '';
+  const lastText =
+    last?.status === 'done'
+      ? last.answer && 'text' in last.answer
+        ? last.answer.text
+        : last.reply
+      : '';
   useEffect(() => {
     end.current?.scrollIntoView({ block: 'end' });
   }, [entries.length, lastText]);
@@ -62,7 +67,7 @@ export function ChatLog({ entries, ...actions }: LogProps) {
       {entries.map((entry) => (
         <li key={entry.id} className="flex flex-col gap-1.5">
           <p className="text-xs text-muted">
-            {entry.step.kind === 'dive' ? 'You dove into' : entry.status === 'context' ? 'You asked for context' : 'You asked'}
+{entry.step.kind === 'dive' ? 'You dove into' : entry.status === 'context' ? 'You asked for context' : 'You asked'}
           </p>
           <p className="font-serif text-lg leading-snug">{entry.step.text}</p>
           <div className="mt-1 border-l-2 border-accent pl-3">
@@ -174,11 +179,17 @@ function Status({
           </span>
         </>
       )}
+
     </div>
   );
 }
 
 const MODE_LABEL: Record<AskMode, string> = { auto: 'Auto', articles: 'Articles', context: 'Context' };
+const MODE_HINT: Record<AskMode, string> = {
+  auto: 'The AI decides where your question goes',
+  articles: 'A new page of Wikipedia articles',
+  context: 'Web context in the Context panel',
+};
 const PLACEHOLDER: Record<AskMode, string> = {
   auto: 'Ask a question or for context',
   articles: 'Search for new articles',
@@ -189,8 +200,8 @@ interface ComposerProps {
   onAsk: (question: string, mode: AskMode) => void;
   mode: AskMode;
   onModeChange: (mode: AskMode) => void;
-  /** Show Auto | Articles | Context (only when web context is available). */
-  modes: boolean;
+  /** The modes this server offers, in order (Auto first). One or none: no switch, questions go to articles. */
+  modes: AskMode[];
   docked: boolean;
   onToggleDock: () => void;
   /** The collapsed chat's expand control (center only). */
@@ -200,7 +211,8 @@ interface ComposerProps {
 /** The one input: questions go to a new page of articles or to the context panel. */
 export function ChatComposer({ onAsk, mode, onModeChange, modes, docked, onToggleDock, expand }: ComposerProps) {
   const [text, setText] = useState('');
-  const effective: AskMode = modes ? mode : 'articles';
+  const switchable = modes.length > 1;
+  const effective: AskMode = switchable && modes.includes(mode) ? mode : 'articles';
   const modeRef = useRef(effective);
   modeRef.current = effective;
   const voice = useVoiceControls((q) => onAsk(q, modeRef.current));
@@ -217,17 +229,18 @@ export function ChatComposer({ onAsk, mode, onModeChange, modes, docked, onToggl
     <div className="flex flex-col">
       <VoiceStatusRows controls={voice} rowClassName="border-b border-separator px-5 py-3" />
       <div className="flex items-center justify-between gap-2 px-3 pt-2">
-        {modes ? (
+        {switchable ? (
           <div role="radiogroup" aria-label="Send questions to" className="flex rounded-full bg-default p-0.5">
-            {(['auto', 'articles', 'context'] as const).map((m) => (
+            {modes.map((m) => (
               <button
                 key={m}
                 type="button"
                 role="radio"
-                aria-checked={mode === m}
+                aria-checked={effective === m}
+                title={MODE_HINT[m]}
                 onClick={() => onModeChange(m)}
                 className={`rounded-full px-2.5 py-0.5 text-xs outline-none focus-visible:ring-2 focus-visible:ring-focus ${
-                  mode === m ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted'
+                  effective === m ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted'
                 }`}
               >
                 {MODE_LABEL[m]}

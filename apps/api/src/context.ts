@@ -10,7 +10,7 @@ export const webSearchEnabled = Boolean(apiKey);
 const RESULTS = 4;
 const MAX_CHARS = 1500;
 
-const EXCLUDED_DOMAINS = [
+export const EXCLUDED_DOMAINS = [
   'wikipedia.org',
   'facebook.com',
   'instagram.com',
@@ -23,6 +23,53 @@ const EXCLUDED_DOMAINS = [
   'youtube.com',
   'linkedin.com',
 ];
+
+/**
+ * Wikipedia, its sister projects, and sites that republish its articles. A
+ * fact-check against any of these is Wikipedia checking itself.
+ */
+export const WIKIPEDIA_COPIES = [
+  'wikipedia.org',
+  'wikimedia.org',
+  'wikidata.org',
+  'wikisource.org',
+  'wikiquote.org',
+  'wikibooks.org',
+  'wikiversity.org',
+  'wikivoyage.org',
+  'wiktionary.org',
+  'wikiwand.com',
+  'wikimili.com',
+  'wikizero.com',
+  'wiki2.org',
+  'wikiless.org',
+  'wikitia.com',
+  'dbpedia.org',
+  'alchetron.com',
+  'everybodywiki.com',
+  'infogalactic.com',
+  'justapedia.org',
+  'newworldencyclopedia.org',
+  'kiddle.co',
+  'academic-accelerator.com',
+  'en-academic.com',
+  'thefreedictionary.com',
+  'sensagent.com',
+  'fandom.com',
+  'wikiaccess.org',
+];
+
+/** Whether a site is one web search leaves out anyway (social and user-generated sites). */
+export const isExcludedSite = (host: string) => {
+  const h = host.toLowerCase().replace(/^www\./, '');
+  return EXCLUDED_DOMAINS.some((d) => h === d || h.endsWith(`.${d}`));
+};
+
+/** Whether a host name (or a site title such as "en.wikipedia.org") is Wikipedia or a copy of it. */
+export const isWikipediaCopy = (host: string) => {
+  const h = host.toLowerCase().replace(/^www\./, '');
+  return WIKIPEDIA_COPIES.some((d) => h === d || h.endsWith(`.${d}`)) || /wiki(pedia|media|data|wand|mili)/.test(h);
+};
 
 interface SearchResult {
   url: string;
@@ -54,7 +101,12 @@ const clip = (text: string) => {
 };
 
 /** Web pages matching the query, each with the passages that match it. Empty if web search isn't configured. */
-export async function searchWeb(query: string, signal?: AbortSignal): Promise<WebSource[]> {
+export async function searchWeb(
+  query: string,
+  signal?: AbortSignal,
+  options: { exclude?: string[]; results?: number } = {},
+): Promise<WebSource[]> {
+  const results = options.results ?? RESULTS;
   if (!apiKey) return [];
   const res = await fetch('https://api.context.dev/v1/web/search', {
     method: 'POST',
@@ -62,11 +114,11 @@ export async function searchWeb(query: string, signal?: AbortSignal): Promise<We
     body: JSON.stringify({
       query: query.slice(0, 500),
       // Over-fetch a little: low-relevance and empty results are dropped below.
-      numResults: RESULTS + 2,
+      numResults: results + 2,
       languages: ['en'],
       // Wikipedia is already covered by the page's own sources; social and
       // user-generated sites make poor sources for a research answer.
-      excludeDomains: EXCLUDED_DOMAINS,
+      excludeDomains: [...new Set([...EXCLUDED_DOMAINS, ...(options.exclude ?? [])])],
       highlightsOptions: { enabled: true, maxCharacters: MAX_CHARS },
       timeoutOpts: { milliseconds: 15_000, behavior: 'return-partial' },
       tags: ['atlas'],
@@ -90,5 +142,5 @@ export async function searchWeb(query: string, signal?: AbortSignal): Promise<We
       };
     })
     .filter((r) => r.text.length >= 80)
-    .slice(0, RESULTS);
+    .slice(0, results);
 }

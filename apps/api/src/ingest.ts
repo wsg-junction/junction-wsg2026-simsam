@@ -14,6 +14,8 @@
  *   npm run ingest -w api -- --limit 50         # a trial run
  *   npm run ingest -w api -- --skip-embeddings  # tables and history only
  *   npm run ingest -w api -- --article-vectors  # only fill article_vectors from stored passages
+ *   npm run ingest -w api -- --media            # only read figures into article_media (vision model)
+ *   npm run ingest -w api -- --media --limit 50 # figures of a few articles
  *   npm run ingest -w api -- --data path/to/wikipedia-en
  *
  * It's resumable: articles whose current revision is already stored are
@@ -28,6 +30,8 @@ import { migrate, pool } from './db.js';
 import { backfillArticleVectors, writeArticleVector } from './articleVectors.js';
 import { embedSkippingRejected, vectorText } from './embeddings.js';
 import { leadOf, sectionsOf } from './wikitext.js';
+import { aiEnabled } from './ai.js';
+import { ensureMedia, MAX_IMAGES } from './media.js';
 
 interface Revision {
   revid: number;
@@ -348,6 +352,50 @@ async function embedPending(articles: ArticleFile[]) {
   if (failedArticles) console.log(`${failedArticles} articles failed and will be retried on the next run.`);
 }
 
+// ---------- Figures ----------
+
+/**
+ * Read every stored article's figures into article_media: the infobox and data
+ * tables from the wikitext, and up to MAX_IMAGES images (likely charts and maps
+ * first) through the vision model, once each. Resumable: articles whose current
+ * revision was already scanned are skipped.
+ */
+async function ingestMedia() {
+  if (!aiEnabled) console.log('No AI configured (NVIDIA_API_KEY or NVIDIA_BASE_URL): storing infoboxes and tables only.');
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT a.title FROM articles a JOIN article_content c USING (page_id)
+     LEFT JOIN article_media_scans s ON s.page_id = a.page_id
+     WHERE s.page_id IS NULL OR s.revision_id <> c.revision_id
+     ORDER BY a.page_id`,
+  );
+  const titles = rows.map((r) => String(r.title)).slice(0, limit);
+  console.log(`Reading the figures of ${titles.length} articles (up to ${MAX_IMAGES} images each through the vision model).`);
+  let done = 0;
+  let figures = 0;
+  let failed = 0;
+  const started = Date.now();
+  let next = 0;
+  const worker = async () => {
+    while (next < titles.length) {
+      const title = titles[next++];
+      try {
+        figures += await ensureMedia(title, AbortSignal.timeout(180_000));
+      } catch (err) {
+        failed++;
+        process.stdout.write(`\n  ${title}: ${(err as Error).message.slice(0, 200)}\n`);
+      }
+      done++;
+      const rate = done / ((Date.now() - started) / 1000);
+      process.stdout.write(
+        `\r  ${done}/${titles.length} articles, ${figures} figures, ~${Math.round((titles.length - done) / Math.max(rate, 0.01) / 60)} min left   `,
+      );
+    }
+  };
+  await Promise.all(Array.from({ length: 3 }, worker));
+  process.stdout.write('\n');
+  if (failed) console.log(`${failed} articles failed and will be retried on the next run.`);
+}
+
 // ---------- Main ----------
 
 async function main() {
@@ -355,6 +403,11 @@ async function main() {
   if (flag('article-vectors')) {
     const n = await backfillArticleVectors();
     console.log(n ? `Stored ${n} article vectors.` : 'Every embedded article already has its article vector.');
+    await pool.end();
+    return;
+  }
+  if (flag('media')) {
+    await ingestMedia();
     await pool.end();
     return;
   }

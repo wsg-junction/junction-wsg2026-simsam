@@ -45,6 +45,11 @@ input below every tab. It has one input with **Auto | Articles | Context**:
 Articles makes a new research page, Context fills the Context panel, and Auto
 lets the model decide with a tool call (`POST /api/route`).
 
+`NVIDIA_BASE_URL` moves the chat and vision model off NVIDIA's catalog onto any
+OpenAI-compatible server, for example Nemotron 3.5 Super VL served with vLLM or
+NIM on a Verda GPU instance (`http://<instance>:8000/v1`); set `NVIDIA_MODEL` to
+the name that server uses. Embeddings stay on the catalog.
+
 Set `CONTEXT_DEV_API_KEY` to add a **Context** panel beside the map, with web
 context from [context.dev](https://docs.context.dev). The research pages and
 their answers stay Wikipedia only; the panel is kept apart. For every question
@@ -55,11 +60,70 @@ fills the Context panel in the background with the pages found and a short,
 cited AI summary of them. You can also ask the panel for context on any angle
 of the page's topic.
 
+### Deep research
+
+With the corpus loaded, explorations get a second main tab, **Deep research**
+(also started from the opening screen), that researches a topic in depth into a
+full report (`apps/api/src/report.ts`, `POST /api/deep-report`, streamed):
+
+1. **Plan**: the model sets 3 to 5 research questions and splits the topic into
+   4 to 7 parts (causes, phases or theatres, the parties involved, themes such
+   as the Holocaust, consequences), each with search queries.
+2. **Gather, MariaDB first**: per part, vector search over the passages of the
+   collection (several articles per query), live Wikipedia where the collection
+   is thin, the figures of its main articles (maps, charts, tables, infoboxes,
+   read by the vision model once and stored), and, with **Include web sources**,
+   context.dev pages (Wikipedia and its copies excluded).
+3. **Write** each part from its own numbered evidence only: sections, key facts,
+   a data chart when the evidence has comparable numbers, dated events, figures.
+4. **Synthesise**: abstract, an answer per research question, limitations, and
+   the eras of the timeline. Citations are renumbered in reading order.
+
+Model replies use structured output (`response_format: json_schema`), so they are
+always valid JSON. The report shows the abstract, the research questions, a
+timeline of all events (one lane per part, eras on top; drag to move, scroll or
+pinch to zoom, details appear when zoomed in), one page per part, findings,
+limitations, method and numbered references, and downloads as Markdown. A run
+takes about 2 to 4 minutes; reports are saved with the exploration.
+
+### Figures (article_media)
+
+Each article's infobox and data tables are parsed from its wikitext, and up to
+four images (likely charts and maps first) are read once by the vision model
+(Nemotron 3.5 Super VL) into text: a chart's values, a map's regions and fronts.
+Every figure is embedded into `article_media` (`VECTOR(1024)` with its own
+cosine index), so `searchCorpus` matches what figures show, not just the prose.
+Figures are read lazily the first time a deep research uses an article, or in
+bulk:
+
+```sh
+npm run ingest -w api -- --media              # every article (resumable; up to 4 vision calls each)
+npm run ingest -w api -- --media --limit 50   # a few
+```
+
+### Fact-check
+
+Set `GEMINI_API_KEY` to add a **Fact-check** side panel. It follows the page in
+view: Gemini picks up to six checkable claims from the article's opening. For
+each, evidence is gathered from independent sources only: Google Search through
+Gemini (keeping just the statements Google attributes to non-Wikipedia pages)
+and, with `CONTEXT_DEV_API_KEY`, web search through context.dev (quoted
+passages). Wikipedia, its sister projects (Wikidata, Wikisource...) and sites
+that copy it are excluded, and passages repeating the Wikipedia sentence word for
+word are dropped as copies. A separate Gemini call then judges the claim on that
+evidence alone and must cite it. Each claim shows a verdict
+(confirmed, partly confirmed, contradicted, not found), the claim as Wikipedia
+states it next to what the sources say with the differing words highlighted, and
+the evidence it rests on with excerpts. A verdict citing no evidence is shown as
+"not found". Results are
+stored in `fact_checks` (keyed on article, claim and revision) and reused until
+the article has a newer revision. Only the article's text is sent to Gemini.
+
 ### Saved explorations
 
 Saving stores everything the exploration showed, not just its questions: the
 pages and their Wikipedia sources, the chat, the AI answers and briefs, the
-maps, and the Context and History panels (`explorations.snapshot`, compressed
+maps, deep research reports, and the Context, Fact-check and History panels (`explorations.snapshot`, compressed
 JSON). Opening a save restores it as it was without searching or generating
 anything again; new follow-ups continue from there. Anything still loading at
 the moment of saving is fetched again on open. Saves from before snapshots
@@ -95,6 +159,8 @@ It needs `NVIDIA_API_KEY` for the embeddings (`nvidia/nemotron-3.5-embed-1b`,
 | `article_content` | `WITH SYSTEM VERSIONING`: each article's revisions, replayed at their original edit times, so `ROW_START` is the Wikipedia edit time and `FOR SYSTEM_TIME AS OF '2015-01-01'` returns the article as it read then |
 | `article_chunks` | Section-aware passages of the current text with a `VECTOR(1024)` embedding and an HNSW `VECTOR INDEX` (cosine) |
 | `article_vectors` | One vector per article (the normalized mean of its passages) with its own `VECTOR INDEX`, for article-to-article similarity |
+| `article_media` | Figures: infobox, tables, and images read by the vision model, each with a `VECTOR(1024)` embedding and its own `VECTOR INDEX` (`article_media_scans` records which revision was read) |
+| `fact_checks` | Fact-check verdicts per article, claim and revision, with their grounding sources |
 
 The topic map comes from MariaDB alone (`POST /api/graph`): each topic's
 neighbours are its nearest articles in `article_vectors`, expanded five steps
@@ -146,6 +212,9 @@ frontend; Caddy sits in front and serves it over HTTPS at `DOMAIN`.
    read -rs -p 'NVIDIA API key: ' KEY && echo "NVIDIA_API_KEY=$KEY" >> /opt/simsam/.env && unset KEY
    read -rs -p 'ElevenLabs API key: ' KEY && echo "ELEVENLABS_API_KEY=$KEY" >> /opt/simsam/.env && unset KEY
    read -rs -p 'context.dev API key: ' KEY && echo "CONTEXT_DEV_API_KEY=$KEY" >> /opt/simsam/.env && unset KEY
+   read -rs -p 'Gemini API key: ' KEY && echo "GEMINI_API_KEY=$KEY" >> /opt/simsam/.env && unset KEY
+   # optional, Nemotron on your own GPU instance instead of NVIDIA's catalog:
+   # echo 'NVIDIA_BASE_URL=http://<gpu-instance>:8000/v1' >> /opt/simsam/.env
    echo '<SECRET>' | docker login vccr.io/<PROJECT_ID> -u 'vcr-<PROJECT_ID>+<name>' --password-stdin
    ```
 3. **Domain**: at your registrar, add an `A` record for `DOMAIN` → instance public IP,

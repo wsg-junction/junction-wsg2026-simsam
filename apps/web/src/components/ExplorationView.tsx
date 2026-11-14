@@ -1,7 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '@heroui/react';
-import type { ExplorationStep, PriorTurn } from '@simsam/models';
-import { aiAvailable, fetchBrief, fetchContext, planSources, rewriteQuery, routeQuestion, serverFeatures, streamAnswer } from '../lib/ai';
+import type { DeepReport, ExplorationStep, PriorTurn } from '@simsam/models';
+import {
+  aiAvailable,
+  fetchBrief,
+  fetchContext,
+  fetchFactCheck,
+  planSources,
+  rewriteQuery,
+  routeQuestion,
+  serverFeatures,
+  streamAnswer,
+  streamDeepReport,
+} from '../lib/ai';
 import {
   HistoryUnavailableError,
   historyTarget,
@@ -18,6 +29,8 @@ import { fetchArticleTimeline, TimelineUnavailableError } from '../lib/history';
 import { buildGraph, MAX_DEPTH, NoResultsError } from '../lib/wikipedia';
 import { ChatCenter, ChatComposer, ChatLog, type AskMode, type ChatEntry } from './ChatCenter';
 import { ContextPanel, type ContextEntry } from './ContextPanel';
+import { FactCheckPanel, type FactCheckState } from './FactCheckPanel';
+import { DeepResearchTab, type DeepRun } from './DeepResearchTab';
 import { contentSignature, takeSnapshot, type ExplorationSnapshot, type ExplorationState } from '../lib/snapshot';
 import { HistoryPanel, type TimelineState } from './HistoryPanel';
 import { withoutCitations } from './Cite';
@@ -32,6 +45,8 @@ interface Props {
   /** Whether a saved copy exists. */
   saved: boolean;
   onSave: (steps: ExplorationStep[], focusTitle: string, snapshot: ExplorationSnapshot) => Promise<void>;
+  /** Open on the Deep research tab with this topic ready to research (from the opening screen). */
+  initialDeep?: string;
 }
 
 let entryId = 0;
@@ -62,7 +77,66 @@ const questionFor = (step: ExplorationStep) =>
       ? `How has the Wikipedia article “${step.text}” changed over time?`
       : step.text;
 
-export function ExplorationView({ initialSteps, snapshot, saved, onSave }: Props) {
+export function ExplorationView({ initialSteps, snapshot, saved, onSave, initialDeep }: Props) {
+  // The main area: the research pages, or deep research reports.
+  const [mainTab, setMainTab] = useState<'pages' | 'deep'>(() => snapshot?.mainTab ?? (initialDeep ? 'deep' : 'pages'));
+  const [reports, setReports] = useState<DeepReport[]>(() => snapshot?.reports ?? []);
+  const [reportId, setReportId] = useState<string | null>(() => snapshot?.reports?.at(-1)?.id ?? null);
+  const [deepRun, setDeepRun] = useState<DeepRun | null>(null);
+  const deepAbort = useRef<AbortController | null>(null);
+  const startDeep = (topic: string, web: boolean) => {
+    deepAbort.current?.abort();
+    const controller = new AbortController();
+    deepAbort.current = controller;
+    setMainTab('deep');
+    setMobileTab('research');
+    let current: DeepRun = { status: 'running', topic, web, startedAt: Date.now(), steps: [] };
+    setDeepRun(current);
+    const update = (next: DeepRun) => {
+      if (deepAbort.current !== controller) return;
+      current = next;
+      setDeepRun(next);
+    };
+    let finished = false;
+    streamDeepReport(
+      { topic, web },
+      (event) => {
+        if (current.status !== 'running') return;
+        if (event.type === 'plan') update({ ...current, plan: { title: event.title, questions: event.questions, parts: event.parts } });
+        if (event.type === 'step') {
+          const steps = current.steps.some((x) => x.id === event.step.id)
+            ? current.steps.map((x) => (x.id === event.step.id ? event.step : x))
+            : [...current.steps, event.step];
+          update({ ...current, steps });
+        }
+        if (event.type === 'error') {
+          finished = true;
+          update({ status: 'error', topic, web, message: event.message });
+        }
+        if (event.type === 'report') {
+          finished = true;
+          if (deepAbort.current !== controller) return;
+          setReports((list) => [...list, event.report]);
+          setReportId(event.report.id);
+          setDeepRun(null);
+        }
+      },
+      controller.signal,
+    )
+      .then(() => {
+        if (!finished) update({ status: 'error', topic, web, message: 'The research stopped before it finished.' });
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) update({ status: 'error', topic, web, message: 'The research couldn’t be started right now.' });
+      });
+  };
+  const cancelDeep = () => {
+    deepAbort.current?.abort();
+    deepAbort.current = null;
+    setDeepRun(null);
+  };
+  useEffect(() => () => deepAbort.current?.abort(), []);
+
   const [pages, setPages] = useState<ResearchPage[]>(() => snapshot?.pages ?? []);
   const [entries, setEntries] = useState<ChatEntry[]>(() => snapshot?.entries ?? []);
   const [active, setActive] = useState(() => snapshot?.active ?? 0);
@@ -352,12 +426,16 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave }: Props
   // Article histories exist only for the local collection; context needs web search.
   const [corpusOn, setCorpusOn] = useState(false);
   const [webOn, setWebOn] = useState(false);
+  const [deepOn, setDeepOn] = useState(false);
+  const [factOn, setFactOn] = useState(false);
   useEffect(() => {
     let live = true;
     serverFeatures().then((h) => {
       if (!live) return;
       setCorpusOn(h?.corpus === true);
       setWebOn(h?.web === true);
+      setDeepOn(h?.deep === true);
+      setFactOn(h?.factcheck === true);
     });
     return () => {
       live = false;
@@ -483,6 +561,7 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave }: Props
     ...(chatDocked ? (['chat'] as const) : []),
     'map',
     ...(webOn ? (['context'] as const) : []),
+    ...(factOn ? (['factcheck'] as const) : []),
     ...(corpusOn ? (['history'] as const) : []),
   ];
   const shownTab: SideTab = sideTabs.includes(sideTab) ? sideTab : 'map';
@@ -491,6 +570,7 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave }: Props
     ...(chatDock === 'side' && desktop ? (['chat'] as const) : []),
     'map',
     ...(webOn ? (['context'] as const) : []),
+    ...(factOn ? (['factcheck'] as const) : []),
     ...(corpusOn ? (['history'] as const) : []),
   ];
   const openTab = (tab: SideTab) => {
@@ -516,6 +596,26 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave }: Props
     const i = railTabs.indexOf(tab);
     return i === -1 ? undefined : `Alt+${i + 1}`;
   };
+  // The fact-check follows the page in view like the history panel, but only
+  // runs once its tab is open (each new check costs several web searches).
+  const [factChecks, setFactChecks] = useState<Record<string, FactCheckState>>(() => snapshot?.factChecks ?? {});
+  const factChecksRef = useRef(factChecks);
+  factChecksRef.current = factChecks;
+  const [factAttempt, setFactAttempt] = useState(0);
+  const factTitle = activePage?.focus;
+  const factVisible = shownTab === 'factcheck' && (desktop ? !mapCollapsed : mobileTab === 'side');
+  useEffect(() => {
+    if (!factOn || !factVisible || !factTitle) return;
+    const existing = factChecksRef.current[factTitle];
+    if (existing && existing.status !== 'error') return;
+    const set = (state: FactCheckState) => setFactChecks((all) => ({ ...all, [factTitle]: state }));
+    set({ status: 'loading' });
+    fetchFactCheck(factTitle)
+      .then((report) => set(report ? { status: 'ready', report } : { status: 'missing' }))
+      .catch((err: Error) => set({ status: 'error', message: err.message.startsWith('Fact-check failed') ? undefined : err.message }));
+  }, [factOn, factVisible, factTitle, factAttempt]);
+  const activeFactCheck = factTitle ? factChecks[factTitle] : undefined;
+
   const sideName = sideTabs.length === 1 ? 'Map' : sideTabs.map((t) => SIDE_LABEL[t].toLowerCase()).join(', ').replace(/^m/, 'M').replace(/, ([^,]*)$/, ' and $1');
 
   // The chat carries the AI: in detailed mode each page's full answer (cited)
@@ -543,6 +643,10 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave }: Props
   const sideBadges: Partial<Record<SideTab, { busy: boolean; count: number }>> = {
     chat: { busy: chatBusy, count: 0 },
     context: { busy: activeContexts.some((e) => e.state.status === 'loading'), count: activeContexts.length },
+    factcheck: {
+      busy: activeFactCheck?.status === 'loading',
+      count: activeFactCheck?.status === 'ready' ? activeFactCheck.report.claims.length : 0,
+    },
     history: {
       busy: activeTimeline?.status === 'loading',
       count: activeTimeline?.status === 'ready' ? activeTimeline.timeline.changes.length : 0,
@@ -559,15 +663,15 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave }: Props
     onAsk: (q: string, how: AskMode) => void ask(q, how),
     mode: askMode,
     onModeChange: setAskMode,
-    modes: webOn,
+    modes: (webOn ? ['auto', 'articles', 'context'] : ['articles']) as AskMode[],
     onToggleDock: toggleDock,
   };
   const steps = pages.map((p) => p.step);
   // Saved means: nothing finished since the last save (a new page, answer, map, context or history).
-  const state: ExplorationState = { pages, entries, answers, briefs, graphs, contexts, timelines, active };
+  const state: ExplorationState = { pages, entries, answers, briefs, graphs, contexts, timelines, factChecks, reports, mainTab, active };
   const signature = contentSignature(state);
   const [savedSignature, setSavedSignature] = useState(() =>
-    snapshot && saved ? contentSignature({ ...snapshot }) : undefined,
+    snapshot && saved ? contentSignature({ ...snapshot, factChecks: snapshot.factChecks ?? {}, reports: snapshot.reports ?? [], mainTab: snapshot.mainTab ?? "pages" }) : undefined,
   );
   const isSaved = savedSignature !== undefined && savedSignature === signature;
 
@@ -596,7 +700,30 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave }: Props
           {initialSteps[0].text}
         </h1>
         <div className="flex shrink-0 items-center gap-2 max-sm:w-full max-sm:flex-wrap max-sm:justify-between max-sm:gap-y-2">
-          <div role="group" aria-label="Page style" className="flex rounded-full bg-default p-0.5">
+          {deepOn && (
+            <div role="group" aria-label="Main view" className="flex rounded-full bg-default p-0.5">
+              {(['pages', 'deep'] as const).map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  aria-pressed={mainTab === t}
+                  onClick={() => {
+                    setMainTab(t);
+                    setMobileTab('research');
+                  }}
+                  className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-sm whitespace-nowrap outline-none focus-visible:ring-2 focus-visible:ring-focus ${
+                    mainTab === t ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted'
+                  }`}
+                >
+                  {t === 'pages' ? 'Pages' : 'Deep research'}
+                  {t === 'deep' && deepRun?.status === 'running' && (
+                    <span aria-label="(researching)" className="size-2 animate-pulse rounded-full bg-accent motion-reduce:animate-none" />
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
+          <div role="group" aria-label="Page style" className={`flex rounded-full bg-default p-0.5 ${mainTab === 'deep' ? 'hidden' : ''}`}>
             {(['detailed', 'compact'] as const).map((m) => (
               <button
                 key={m}
@@ -611,7 +738,7 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave }: Props
               </button>
             ))}
           </div>
-          <div role="group" aria-label="Show" className="flex rounded-full bg-default p-0.5 lg:hidden">
+          <div role="group" aria-label="Show" className="flex max-w-full overflow-x-auto rounded-full bg-default p-0.5 [scrollbar-width:none] lg:hidden">
             {(['research', ...sideTabs.filter((t) => t !== 'chat')] as const).map((tab) => {
               const pressed = tab === 'research' ? mobileTab === 'research' : mobileTab === 'side' && sideTab === tab;
               return (
@@ -624,7 +751,7 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave }: Props
                     setMobileTab('side');
                     setSideTab(tab);
                   }}
-                  className={`rounded-full px-3 py-1 text-sm outline-none focus-visible:ring-2 focus-visible:ring-focus ${
+                  className={`shrink-0 rounded-full px-3 py-1 text-sm whitespace-nowrap max-sm:px-2.5 outline-none focus-visible:ring-2 focus-visible:ring-focus ${
                     pressed ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted'
                   }`}
                 >
@@ -644,6 +771,19 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave }: Props
           aria-label="Research"
           className={`relative min-w-0 flex-1 bg-background ${mobileTab === 'side' ? 'max-lg:hidden' : ''}`}
         >
+          {mainTab === 'deep' && (
+            <DeepResearchTab
+              reports={reports}
+              selectedId={reportId}
+              onSelect={setReportId}
+              run={deepRun}
+              onStart={startDeep}
+              onCancel={cancelDeep}
+              suggestion={initialDeep ?? activePage?.focus ?? initialSteps[0]?.text}
+              webAvailable={webOn}
+            />
+          )}
+          <div className={mainTab === 'deep' ? 'hidden' : 'contents'}>
           <ResearchCanvas
             ref={canvas}
             pages={pages}
@@ -663,6 +803,7 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave }: Props
             }
           />
           {!chatDocked && <ChatCenter log={logProps} composer={composerProps} />}
+          </div>
         </section>
 
         <aside
@@ -747,6 +888,16 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave }: Props
                 }}
               />
             )}
+            {factOn && shownTab === 'factcheck' && (
+              <FactCheckPanel
+                title={factTitle}
+                state={activeFactCheck}
+                onRetry={() => {
+                  if (factTitle) setFactChecks(({ [factTitle]: _, ...rest }) => rest);
+                  setFactAttempt((n) => n + 1);
+                }}
+              />
+            )}
             {webOn && shownTab === 'context' && (
               <ContextPanel
                 topic={activePage?.history ? undefined : activePage?.focus}
@@ -772,8 +923,14 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave }: Props
   );
 }
 
-type SideTab = 'chat' | 'map' | 'context' | 'history';
-const SIDE_LABEL: Record<SideTab, string> = { chat: 'Chat', map: 'Map', context: 'Context', history: 'History' };
+type SideTab = 'chat' | 'map' | 'context' | 'factcheck' | 'history';
+const SIDE_LABEL: Record<SideTab, string> = {
+  chat: 'Chat',
+  map: 'Map',
+  context: 'Context',
+  factcheck: 'Fact-check',
+  history: 'History',
+};
 
 /** Map | Context | History, at the top of the side panel, with the collapse control. */
 function SideTabs({
@@ -835,6 +992,7 @@ function SideIcon({ tab }: { tab: SideTab }) {
     chat: 'M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z',
     map: 'M4 12a2 2 0 1 0 4 0a2 2 0 1 0-4 0M16 6a2 2 0 1 0 4 0a2 2 0 1 0-4 0M16 18a2 2 0 1 0 4 0a2 2 0 1 0-4 0M8 11l8-4M8 13l8 4',
     context: 'M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18zM3 12h18M12 3c2.5 2.5 3.8 5.5 3.8 9s-1.3 6.5-3.8 9c-2.5-2.5-3.8-5.5-3.8-9S9.5 5.5 12 3z',
+    factcheck: 'M12 3l7 3v5c0 4.5-3 8.3-7 10c-4-1.7-7-5.5-7-10V6l7-3zM8.8 12.2l2.2 2.2l4.2-4.4',
     history: 'M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5M12 7v5l3 2',
   };
   return (

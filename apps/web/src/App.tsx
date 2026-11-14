@@ -20,6 +20,8 @@ type View =
       snapshot?: ExplorationSnapshot;
       /** Set once saved. */
       savedId?: number;
+      /** Opened for deep research on this topic. */
+      deep?: string;
     };
 
 let viewKey = 0;
@@ -40,8 +42,8 @@ export function App() {
     withViewTransition(() => setView(next));
   }, []);
 
-  const explore = (question: string) =>
-    go({ kind: 'exploring', key: ++viewKey, steps: [{ kind: 'question', text: question }] });
+  const explore = (question: string, deep = false) =>
+    go({ kind: 'exploring', key: ++viewKey, steps: [{ kind: 'question', text: question }], deep: deep ? question : undefined });
 
   // Saves with a snapshot open as they were; older ones (steps only) run their steps again.
   const open = async (item: Exploration) => {
@@ -115,6 +117,7 @@ export function App() {
               key={view.key}
               initialSteps={view.steps}
               snapshot={view.snapshot}
+              initialDeep={view.deep}
               saved={view.savedId !== undefined}
               onSave={save}
             />

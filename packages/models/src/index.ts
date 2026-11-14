@@ -9,6 +9,10 @@ export interface Health {
   corpus: boolean;
   /** Whether web search (context.dev) is configured, so the AI can pull in context beyond Wikipedia. */
   web: boolean;
+  /** Whether deep research reports are available: AI plus the corpus. */
+  deep: boolean;
+  /** Whether the fact-checker (Gemini with Google Search grounding) is configured. */
+  factcheck: boolean;
 }
 
 /** A passage from a web page found by web search (context.dev), used as a source next to Wikipedia. */
@@ -260,4 +264,174 @@ export interface ArticleHistory {
   changes: ArticleChange[];
   brief: Brief;
   byAi: boolean;
+}
+
+// ---------- Figures (article_media) ----------
+
+/** What a stored figure is: an image the vision model read (chart, map, diagram, photo) or text parsed from wikitext (infobox, table). */
+export type MediaKind = 'chart' | 'map' | 'diagram' | 'photo' | 'infobox' | 'table';
+
+// ---------- Deep research reports ----------
+
+/** POST /api/deep-report: research a topic in depth into a full report. */
+export interface DeepReportRequest {
+  topic: string;
+  /** Also search the web (context.dev) beside the Wikipedia collection. */
+  web: boolean;
+}
+
+/** Something the report cites as [n]. */
+export interface ReportSource {
+  n: number;
+  /** A Wikipedia passage (from the collection, or live for articles outside it), a figure, or a web page. */
+  kind: 'wikipedia' | 'figure' | 'web';
+  title: string;
+  url: string;
+  section?: string;
+  /** Web pages: the site's domain. */
+  site?: string;
+  /** Wikipedia passages: whether the article is in the MariaDB collection. */
+  stored?: boolean;
+  /** Figures: what kind, its caption, its image (charts, maps, diagrams, photos) and what it shows (text read by the vision model, or the table/infobox text). */
+  mediaKind?: MediaKind;
+  caption?: string;
+  imageUrl?: string;
+  content?: string;
+}
+
+/** An event on the report's timeline. Dates are fractional years (1939.67 is about September 1939; negative for BCE). */
+export interface ReportEvent {
+  id: string;
+  start: number;
+  end?: number;
+  /** How the date reads, e.g. "1 September 1939". */
+  when: string;
+  title: string;
+  detail: string;
+  /** 1: a turning point of the whole topic; 2: major within its part; 3: a detail (shown when zoomed in). */
+  importance: 1 | 2 | 3;
+  /** The part (1-based) it belongs to: its lane on the timeline. */
+  part: number;
+  sources: number[];
+}
+
+export interface ReportFact {
+  label: string;
+  value: string;
+  sources: number[];
+}
+
+/** Comparable figures from the evidence, drawn as a bar chart. */
+export interface ReportDataset {
+  title: string;
+  unit: string;
+  items: { label: string; value: number }[];
+  sources: number[];
+}
+
+/** One part of the report: its own page. */
+export interface ReportPart {
+  n: number;
+  title: string;
+  focus: string;
+  /** 2 or 3 sentences, cited. */
+  summary: string;
+  /** Paragraphs separated by blank lines, cited with [n]. */
+  sections: { heading: string; text: string }[];
+  facts: ReportFact[];
+  dataset: ReportDataset | null;
+  /** Source numbers of the figures shown with this part. */
+  figures: number[];
+}
+
+export interface DeepReport {
+  id: string;
+  topic: string;
+  title: string;
+  createdAt: string;
+  web: boolean;
+  model: string;
+  /** 4 to 6 sentences, cited. */
+  abstract: string;
+  questions: string[];
+  /** One answer per research question (1-based), cited. */
+  answers: { question: number; text: string }[];
+  parts: ReportPart[];
+  events: ReportEvent[];
+  /** Consecutive periods over the timeline. */
+  eras: { from: number; to: number; label: string }[];
+  limitations: string;
+  method: {
+    queries: string[];
+    passages: number;
+    articles: number;
+    liveArticles: number;
+    figures: number;
+    webPages: number;
+    seconds: number;
+  };
+  /** Cited sources, numbered in order of first citation. */
+  sources: ReportSource[];
+}
+
+/** Progress of a deep research run, streamed as server-sent events from POST /api/deep-report. */
+export type DeepReportEvent =
+  | { type: 'step'; step: { id: string; label: string; done: boolean; detail?: string } }
+  | { type: 'plan'; title: string; questions: string[]; parts: { n: number; title: string; focus: string }[] }
+  | { type: 'report'; report: DeepReport }
+  | { type: 'error'; message: string };
+
+// ---------- Fact-check ----------
+
+/** POST /api/fact-check: check the claims in an article's lead against the web. */
+export interface FactCheckRequest {
+  title: string;
+}
+
+/**
+ * supported: web sources agree. partly: they agree on some of it, or give
+ * different details (a date, a figure). contradicted: they say otherwise.
+ * unverified: no source addressed it.
+ */
+export type FactCheckVerdict = 'supported' | 'partly' | 'contradicted' | 'unverified';
+
+/** Independent evidence a verdict rests on (never Wikipedia, its sister projects or copies of it). */
+export interface FactCheckSource {
+  title: string;
+  url: string;
+  /** The site's domain, e.g. "britannica.com". */
+  site?: string;
+  /** What this source says about the claim: quoted (web search) or as Google Search attributed it. */
+  excerpt?: string;
+  /** How it was found: Google Search (through Gemini) or web search (context.dev). */
+  via?: 'google' | 'web';
+}
+
+export interface FactCheckClaim {
+  /** The claim as checked, standing on its own. */
+  claim: string;
+  /** The sentence in the Wikipedia article that makes it, quoted. */
+  statement: string;
+  verdict: FactCheckVerdict;
+  /** What the web sources say, written to compare with the statement. */
+  finding: string;
+  /** One sentence on why. */
+  explanation: string;
+  /** Word-level comparison: "removed" only in the Wikipedia statement, "added" only in the web finding. */
+  comparison: DiffSegment[];
+  /** Pages the check was grounded on (Google Search). */
+  sources: FactCheckSource[];
+  /** What was searched for. */
+  searches: string[];
+}
+
+export interface FactCheckReport {
+  title: string;
+  pageId: number;
+  /** The revision the claims were taken from; results are reused until a newer one exists. */
+  revisionId: number;
+  url: string;
+  checkedAt: string;
+  model: string;
+  claims: FactCheckClaim[];
 }

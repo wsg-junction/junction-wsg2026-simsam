@@ -21,6 +21,13 @@ web (context.dev) only fill gaps.
   page; Context fills the Context panel; Auto lets the model decide by a tool
   call. While Auto decides, the question waits in the chat only (nothing appears
   on the canvas until it's routed).
+- **Deep research is its own main tab** (Pages | Deep research), not a chat mode:
+  a full report on a topic (plan, parts, zoomable timeline, figures, data,
+  findings, references), from MariaDB first, live Wikipedia for gaps, and the
+  web only when the "Include web sources" toggle is on.
+- **Fact-check** is a side panel beside Context: the claims in the page's main
+  article checked against the web by Gemini (Google Search grounding), each with
+  a verdict, a word-level comparison and sources. Only article text goes to Gemini.
 - **History** shows only *substantial* changes (no typo/format fixes, bots,
   reverts, or vandalism that was reverted), with an AI overview, a per-section
   timeline, and a word-level diff per change so people can check it.
@@ -57,6 +64,7 @@ npm run ingest -w api                         # load data/wikipedia-en into Mari
 npm run ingest -w api -- --limit 50           # trial
 npm run ingest -w api -- --skip-embeddings    # tables + history only
 npm run ingest -w api -- --article-vectors    # only fill article_vectors from stored passages
+npm run ingest -w api -- --media [--limit n]  # figures into article_media (vision model, ≤4 images/article)
 node --test scripts/*.test.mjs                # data-script tests
 ```
 
@@ -72,7 +80,9 @@ node --test scripts/*.test.mjs                # data-script tests
 |---|---|
 | `DATABASE_URL` | default `mysql://simsam:simsam@localhost:3306/simsam` |
 | `NVIDIA_API_KEY` | chat model + embeddings (NVIDIA API catalog, OpenAI-compatible) |
-| `NVIDIA_MODEL` | default `nvidia/nemotron-3.5-super-vl-120b-a12b` |
+| `NVIDIA_MODEL` | default `nvidia/nemotron-3.5-super-vl-120b-a12b` (a vision model: it also reads figures) |
+| `NVIDIA_BASE_URL` | optional: run the chat/vision model on another OpenAI-compatible server (vLLM/NIM on Verda); unset = NVIDIA catalog. Embeddings stay on the catalog |
+| `GEMINI_API_KEY`, `GEMINI_MODEL` | the fact-checker (default model `gemini-flash-latest`) |
 | `NVIDIA_EMBEDDING_MODEL` | default `nvidia/nemotron-3.5-embed-1b` (1024 dims) |
 | `CONTEXT_DEV_API_KEY` | web search for the Context panel and Auto routing |
 | `ELEVENLABS_API_KEY` (+ `_VOICE_ID`, `_MODEL_ID`, `_STT_MODEL_ID`) | read-aloud and voice questions |
@@ -80,7 +90,7 @@ node --test scripts/*.test.mjs                # data-script tests
 
 Never print `.env` values; refer to variables by name. Every feature degrades
 gracefully when its key is missing (`GET /api/health` reports `ai`, `voice`,
-`corpus`, `web`).
+`corpus`, `web`, `deep` (AI + corpus), `factcheck`).
 
 ## MariaDB schema (`apps/api/src/db.ts`)
 
@@ -93,6 +103,9 @@ gracefully when its key is missing (`GET /api/health` reports `ai`, `voice`,
 | `article_vectors` | one vector per article (normalized mean of its passages) with its own vector index: article-to-article similarity for the map |
 | `article_revisions` | metadata of up to 2,500 recent revisions per article (from the Wikipedia API), for the history panel |
 | `history_reports` | cached history-panel report per article, reused until a newer revision exists |
+| `article_media` | figures per article: infobox and tables (parsed from wikitext) and images read once by the vision model (chart/map/diagram/photo), each with `embedding VECTOR(1024)` + its own cosine index; `source_key` = file name, "infobox", "table n" |
+| `article_media_scans` | which revision's figures were read (so each image goes through the vision model once) |
+| `fact_checks` | fact-check verdicts, PK (page_id, claim_hash, revision_id); reused until the article has a newer revision |
 
 How history gets into the system-versioned table:
 - **Ingest** replays each article's (≤20) collected revisions oldest first with
@@ -117,9 +130,12 @@ map uses the small `article_vectors` index, not passages.
 | `embeddings.ts` | `embed` (retry/backoff, abortable), `embedSkippingRejected` (bisects 422 content-safety rejections), `embedCached` (in-memory, for interactive search) |
 | `articleVectors.ts` | mean article vectors, backfill |
 | `corpus.ts` | hybrid search (`searchCorpus`), related articles, `corpusArticles`, the DB-only topic map (`corpusGraph`, cached) |
-| `wikipedia.ts` | live Wikipedia fallback (`fetchIntros` reads the corpus first), `wikiFetch` |
-| `wikitext.ts` | minimal wikitext → sections / plain text / lead |
-| `ai.ts` | all model calls: answer stream, brief, rewrite, `planSources`, `routeQuestion`, context summary, history overview |
+| `wikipedia.ts` | live Wikipedia fallback (`fetchIntros` reads the corpus first), `wikiFetch`, `fetchArticleFigures` (images + captions, infobox, tables; stored wikitext first) |
+| `wikitext.ts` | minimal wikitext → sections / plain text / lead; `infoboxOf`, `tablesOf`, `imagesOf`, `expandTemplates` |
+| `ai.ts` | all model calls: answer stream, brief, rewrite, `planSources`, `routeQuestion`, context summary, history overview, `readFigure` (vision), `jsonCompletion` (structured output via `json_schema`, falls back if refused); `NVIDIA_BASE_URL` switch |
+| `report.ts` | deep research: plan → gather per part (`nearestPassages`, live Wikipedia, figures via `ensureMedia`, optional context.dev) → write parts (3 in parallel) → synthesis; event merge, citation renumbering |
+| `media.ts` | figures: `ensureMedia` (parse + vision once + embed + store, lazy or via `--media`), `articleFigures`, `nearestFigures` (used by `searchCorpus`) |
+| `factcheck.ts` | extract claims from the lead (Gemini); per claim gather evidence from Google Search via Gemini (only `groundingSupports` attributed to non-Wikipedia pages) and context.dev (`WIKIPEDIA_COPIES` excluded, verbatim copies dropped); a separate Gemini judge call decides on that evidence alone and must cite it; compare claim vs finding (`diff`); store in `fact_checks` |
 | `context.ts` | context.dev web search (highlights, excludes Wikipedia and social sites) |
 | `timeline.ts` | history panel: scan revisions, pick substantial edits, store them as history rows, measure per-section word changes, AI overview, diffs |
 | `history.ts` | older "How has this article changed?" history *page* from stored versions |
@@ -128,7 +144,7 @@ map uses the small `article_vectors` index, not passages.
 Routes: `/api/health`, `/api/search` (hybrid, takes live `candidates`),
 `/api/related`, `/api/articles`, `/api/graph`, `/api/history`,
 `/api/article-history` (+ `/diff`), `/api/rewrite`, `/api/plan`, `/api/route`,
-`/api/answer` (SSE), `/api/brief`, `/api/context`, `/api/speech`,
+`/api/answer` (SSE), `/api/deep-report` (SSE), `/api/fact-check`, `/api/brief`, `/api/context`, `/api/speech`,
 `/api/transcribe`, `/api/explorations` (+ `/:id` GET/PUT/DELETE; snapshot body ≤15 MB,
 under MariaDB's 16 MB `max_allowed_packet`).
 
@@ -151,6 +167,15 @@ Calibrated cosine distances (best passage): ≤0.45 reliably on topic, 0.45–0.
   pass `chat_template_kwargs: { enable_thinking: false }` for speed.
 - **Tool calls** decide flows: `planSources` (search_wikipedia / search_web) and
   `routeQuestion` (research_articles / find_context).
+- **Long JSON** (deep research plan, parts, synthesis) uses `jsonCompletion` with a
+  JSON schema; without it Nemotron occasionally produced malformed JSON on long outputs.
+- **Vision**: `readFigure` sends an image (data URL, ≤180 KB, downloaded via
+  `Special:FilePath?width=640`) and stores the text; images are picked by
+  `pickImages` (likely charts/maps first, ≤4 per article).
+- **Gemini** is only for the fact-checker. Never let Wikipedia (or sister sites,
+  mirrors) count as evidence; a verdict citing no evidence becomes "unverified".
+  Grounded calls use plain prose and default temperature: asked for JSON or a low
+  temperature, Gemini often skips the search.
 - JSON outputs are parsed defensively and sanitized (`completeBrief`/`sanitizeBrief`
   repair `[1][3]`-style source lists; citations out of range are dropped).
 
@@ -164,7 +189,11 @@ Calibrated cosine distances (best passage): ≤0.45 reliably on topic, 0.45–0.
 | `components/ResearchPageView.tsx` | detailed page (Wikipedia only); `PAGE_COLUMN` = centered reading column |
 | `components/CompactPageView.tsx` | compact page: AI brief as timeline/points with playback |
 | `components/ChatCenter.tsx` | `ChatLog` (answers with citations, context entries), `ChatComposer` (one input + mode switch + voice + dock toggle), `ChatCenter` (floating) |
+| `components/DeepResearchTab.tsx` | the Deep research tab: start form (web toggle), progress (parts, steps), report picker |
+| `components/DeepReportView.tsx` | the report canvas: contents, abstract, questions, timeline + event card, parts (facts, sections, data chart, figures), findings, limitations, method, references; Markdown export (`lib/report.ts`) |
+| `components/TimelineExplorer.tsx` | zoomable timeline: lanes per part, eras, drag/wheel/pinch/keyboard, importance-based detail and collision-free labels |
 | `components/ContextPanel.tsx` | web context results (no input of its own) |
+| `components/FactCheckPanel.tsx` | verdict counts, claims with verdict (icon + label), Wikipedia vs web word comparison, sources |
 | `components/HistoryPanel.tsx` | AI overview, section timeline, changes with diffs |
 | `components/GraphPanel.tsx`, `TopicGraph.tsx` | topic map: d3-force network, pan/zoom/drag, collision-free labels |
 | `components/VoiceControls.tsx` | push-to-talk + hands-free (`lib/handsfree.ts`, `lib/voice.ts`) |
@@ -203,7 +232,8 @@ moves the whole page).
   `puppeteer-core`) and look at screenshots; check light and dark themes and
   phone width.
 - The full ingest is long and memory-hungry: don't start it on your own; the
-  user runs it. `--article-vectors` is light (reads MariaDB only).
+  user runs it. `--article-vectors` is light (reads MariaDB only). `--media` makes
+  up to 4 vision calls per article; don't start it over the whole collection yourself.
 - Don't commit or push unless asked. Commit messages end with the attribution
   line given in the session.
 - Keep `.env` values private, and don't send personal details to external services.

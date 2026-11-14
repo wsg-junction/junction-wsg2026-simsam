@@ -4,6 +4,9 @@ import type {
   Brief,
   ContextRequest,
   ContextResponse,
+  DeepReportEvent,
+  DeepReportRequest,
+  FactCheckReport,
   Health,
   RewriteRequest,
   RewriteResponse,
@@ -72,14 +75,40 @@ export async function fetchContext(body: ContextRequest, signal?: AbortSignal): 
 }
 
 /** Stream an answer, calling `onEvent` for each server-sent event. Throws if the request fails outright. */
-export async function streamAnswer(body: AnswerRequest, onEvent: (event: AnswerEvent) => void, signal?: AbortSignal) {
-  const res = await fetch('/api/answer', {
+export function streamAnswer(body: AnswerRequest, onEvent: (event: AnswerEvent) => void, signal?: AbortSignal) {
+  return streamEvents('/api/answer', body, onEvent, signal);
+}
+
+/** A deep research run: its progress, plan and finally the report. Throws if the request fails outright. */
+export function streamDeepReport(body: DeepReportRequest, onEvent: (event: DeepReportEvent) => void, signal?: AbortSignal) {
+  return streamEvents('/api/deep-report', body, onEvent, signal);
+}
+
+/** The article's claims checked against the web. Null if no such article; throws if the check fails. */
+export async function fetchFactCheck(title: string, signal?: AbortSignal): Promise<FactCheckReport | null> {
+  const res = await fetch('/api/fact-check', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title }),
+    signal,
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    const reason = await res.json().then((b: { error?: string }) => b.error).catch(() => undefined);
+    throw new Error(reason ?? `Fact-check failed with ${res.status}`);
+  }
+  return (await res.json()) as FactCheckReport;
+}
+
+/** POST a JSON body and read server-sent events from the response. */
+async function streamEvents<T>(path: string, body: unknown, onEvent: (event: T) => void, signal?: AbortSignal) {
+  const res = await fetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
     signal,
   });
-  if (!res.ok || !res.body) throw new Error(`Answer request failed with ${res.status}`);
+  if (!res.ok || !res.body) throw new Error(`${path} failed with ${res.status}`);
 
   const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
   let buffer = '';
@@ -92,7 +121,7 @@ export async function streamAnswer(body: AnswerRequest, onEvent: (event: AnswerE
       const block = buffer.slice(0, end);
       buffer = buffer.slice(end + 2);
       for (const line of block.split('\n')) {
-        if (line.startsWith('data: ')) onEvent(JSON.parse(line.slice(6)) as AnswerEvent);
+        if (line.startsWith('data: ')) onEvent(JSON.parse(line.slice(6)) as T);
       }
     }
   }

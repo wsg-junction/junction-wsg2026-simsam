@@ -124,4 +124,60 @@ export async function migrate() {
       VECTOR INDEX (embedding) M=16 DISTANCE=cosine
     )
   `);
+
+  // Figures of an article: images read once by the vision model (charts, maps,
+  // diagrams, photos), and the infobox and tables parsed from the wikitext,
+  // each embedded for search. source_key names the figure within the article
+  // (the file name, "infobox", "table 2").
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS article_media (
+      id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      page_id INT UNSIGNED NOT NULL,
+      title VARCHAR(255) NOT NULL,
+      revision_id BIGINT UNSIGNED NOT NULL,
+      position SMALLINT UNSIGNED NOT NULL,
+      source_key VARCHAR(255) NOT NULL,
+      kind ENUM('chart', 'map', 'diagram', 'photo', 'infobox', 'table') NOT NULL,
+      image_url VARCHAR(1024) NULL,
+      caption TEXT NULL,
+      content TEXT NOT NULL,
+      model VARCHAR(100) NULL,
+      embedding VECTOR(${EMBEDDING_DIMENSIONS}) NOT NULL,
+      created_at DATETIME NOT NULL,
+      UNIQUE KEY article_media_source (page_id, source_key),
+      VECTOR INDEX (embedding) M=16 DISTANCE=cosine
+    ) DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci
+  `);
+  // Which revision's figures have been read, so each figure goes through the vision model once.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS article_media_scans (
+      page_id INT UNSIGNED PRIMARY KEY,
+      revision_id BIGINT UNSIGNED NOT NULL,
+      figures SMALLINT UNSIGNED NOT NULL,
+      scanned_at DATETIME NOT NULL
+    )
+  `);
+
+  // The fact-checker's verdicts (Gemini, grounded on Google Search), per claim
+  // and revision: reused until the article has a newer revision.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS fact_checks (
+      page_id INT UNSIGNED NOT NULL,
+      claim_hash CHAR(64) NOT NULL,
+      revision_id BIGINT UNSIGNED NOT NULL,
+      position SMALLINT UNSIGNED NOT NULL,
+      title VARCHAR(255) NOT NULL,
+      claim TEXT NOT NULL,
+      statement TEXT NOT NULL,
+      verdict ENUM('supported', 'partly', 'contradicted', 'unverified') NOT NULL,
+      finding TEXT NOT NULL,
+      explanation TEXT NOT NULL,
+      sources JSON NOT NULL,
+      searches JSON NOT NULL,
+      model VARCHAR(100) NOT NULL,
+      checked_at DATETIME NOT NULL,
+      PRIMARY KEY (page_id, claim_hash, revision_id),
+      KEY fact_checks_revision (page_id, revision_id, position)
+    ) DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci
+  `);
 }

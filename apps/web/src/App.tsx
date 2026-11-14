@@ -81,7 +81,7 @@ export function App() {
       <Sidebar {...listProps} onNew={() => go({ kind: 'opening' })} />
 
       {/* Compact header on small screens */}
-      <header className="flex items-center justify-between gap-2 border-b border-border bg-surface/80 px-4 py-2.5 backdrop-blur-sm md:hidden">
+      <header className="flex shrink-0 items-center justify-between gap-2 border-b border-border bg-surface/80 px-4 py-1.5 backdrop-blur-sm md:hidden">
         <Brand />
         <div className="flex items-center gap-1">
           <Button

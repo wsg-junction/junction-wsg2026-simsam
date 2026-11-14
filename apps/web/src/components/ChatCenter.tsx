@@ -228,7 +228,7 @@ export function ChatComposer({ onAsk, mode, onModeChange, modes, docked, onToggl
   return (
     <div className="flex flex-col">
       <VoiceStatusRows controls={voice} rowClassName="border-b border-separator px-5 py-3" />
-      <div className="flex items-center justify-between gap-2 px-3 pt-2">
+      <div className="flex items-center justify-between gap-2 px-3 pt-2 max-lg:hidden">
         {switchable ? (
           <div role="radiogroup" aria-label="Send questions to" className="flex rounded-full bg-default p-0.5">
             {modes.map((m) => (
@@ -259,7 +259,7 @@ export function ChatComposer({ onAsk, mode, onModeChange, modes, docked, onToggl
           {docked ? 'Move to the middle' : 'Move to side panel'}
         </button>
       </div>
-      <Form onSubmit={submit} className="flex items-center gap-2 p-2 pl-3">
+      <Form onSubmit={submit} className="flex items-center gap-2 p-2 pl-3 max-lg:gap-1.5 max-lg:pl-2">
         {expand && (
           <Button
             isIconOnly
@@ -269,9 +269,29 @@ export function ChatComposer({ onAsk, mode, onModeChange, modes, docked, onToggl
             aria-expanded={expand.open}
             aria-controls="chat-history"
             onPress={expand.onToggle}
+            className="max-lg:hidden"
           >
             <ChevronIcon up={!expand.open} />
           </Button>
+        )}
+        {switchable && (
+          <label className="relative shrink-0 lg:hidden">
+            <span className="sr-only">Send questions to</span>
+            <select
+              value={effective}
+              onChange={(e) => onModeChange(e.target.value as AskMode)}
+              className="appearance-none rounded-full bg-default py-1 pr-6 pl-2.5 text-xs font-medium text-foreground outline-none focus-visible:ring-2 focus-visible:ring-focus"
+            >
+              {modes.map((m) => (
+                <option key={m} value={m}>
+                  {MODE_LABEL[m]}
+                </option>
+              ))}
+            </select>
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" aria-hidden className="pointer-events-none absolute top-1/2 right-2 -translate-y-1/2 text-muted">
+              <path d="M6 9l6 6 6-6" />
+            </svg>
+          </label>
         )}
         <TextField aria-label={PLACEHOLDER[effective]} value={text} onChange={setText} className="min-w-0 flex-1">
           <Input placeholder={PLACEHOLDER[effective]} className="chat-input text-base" />
@@ -295,6 +315,20 @@ export function ChatCenter({ log, composer }: { log: LogProps; composer: Omit<Co
   return (
     <div className="pointer-events-none absolute inset-x-0 bottom-0 z-30 flex justify-center px-3 pb-3 sm:px-6 sm:pb-5">
       <div className="pointer-events-auto flex w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-[0_12px_40px_-12px_rgb(0_0_0/0.45)]">
+        {latest && (
+          <button
+            type="button"
+            onClick={() => setOpen((o) => !o)}
+            aria-expanded={open}
+            aria-controls="chat-history"
+            className="flex items-center gap-2 border-b border-separator px-4 py-2 text-left text-sm outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-inset lg:hidden"
+          >
+            <span className="min-w-0 flex-1 truncate">{open ? `Questions and answers (${log.entries.length})` : previewLine(latest)}</span>
+            <span className="shrink-0 text-muted">
+              <ChevronIcon up={!open} />
+            </span>
+          </button>
+        )}
         {open ? (
           <div id="chat-history" className="max-h-[min(60vh,34rem)] overflow-y-auto border-b border-separator px-5 py-4">
             <h2 className="sr-only">Questions and answers</h2>
@@ -302,7 +336,7 @@ export function ChatCenter({ log, composer }: { log: LogProps; composer: Omit<Co
           </div>
         ) : (
           latest && (
-            <div className="flex flex-col gap-1 border-b border-separator px-5 py-3">
+            <div className="flex flex-col gap-1 border-b border-separator px-5 py-3 max-lg:hidden">
               <Status entry={latest} {...log} preview />
               {latest.status === 'done' && latest.answer && 'text' in latest.answer && (
                 <button
@@ -341,4 +375,18 @@ function DockIcon({ docked }: { docked: boolean }) {
       {docked ? <path d="M7 16h10" /> : <path d="M15 4v16" />}
     </svg>
   );
+}
+
+/** The latest entry as one line, for the collapsed chat on phones. */
+function previewLine(entry: ChatEntry) {
+  if (entry.status === 'pending') return entry.routing ? 'Deciding: new articles or context…' : `Researching “${entry.step.text}”…`;
+  if (entry.status === 'error') return entry.message;
+  if (entry.status === 'context') {
+    if (entry.state?.status === 'ready') return entry.state.result.summary ? withoutCitations(entry.state.result.summary) : 'Web context found';
+    return entry.state?.status === 'error' ? 'The web search didn’t respond.' : 'Searching the web for context…';
+  }
+  const a = entry.answer;
+  if (a && (a.status === 'writing' || a.status === 'done')) return withoutCitations(a.text);
+  if (a && (a.status === 'waiting' || a.status === 'thinking')) return 'Reading the sources…';
+  return entry.reply || 'Writing the answer…';
 }

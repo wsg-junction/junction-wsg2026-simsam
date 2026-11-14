@@ -162,24 +162,28 @@ export function ResearchPageView({ page, index, total, onDive, onHistory }: Prop
  * The reading column, centered in the canvas. The side padding is symmetric
  * and wide enough on the right for the page dots, so centering stays true.
  */
-export const PAGE_COLUMN = 'mx-auto w-full max-w-3xl px-12 sm:px-16';
+export const PAGE_COLUMN = 'mx-auto w-full max-w-3xl px-9 sm:px-16';
 
 /** The page's sticky heading: which page this is, and the question or topic it answers. */
 export function PageHeader({ page, index, total }: { page: ResearchPage; index: number; total: number }) {
   return (
-    <header className="sticky top-0 z-10 border-b border-separator bg-background py-4">
+    <header className="sticky top-0 z-10 border-b border-separator bg-background py-2 lg:py-4">
       {/* The same centered column as the page below, so the heading lines up with the text. */}
       <div className={PAGE_COLUMN}>
-        <p className="text-sm text-muted">
+        <p className="text-sm text-muted max-lg:hidden">
           Page {index + 1} of {total}
           {index > 0 && <span className="ml-3">{KIND_LABEL[page.step.kind]}</span>}
         </p>
         <h2
           id={`${page.id}-title`}
-          className={`mt-1 font-serif text-2xl leading-snug font-normal text-balance sm:text-3xl ${
+          className={`font-serif leading-snug font-normal max-lg:truncate max-lg:text-lg lg:mt-1 lg:text-3xl lg:text-balance ${
             index === 0 ? 'question-transition' : ''
           }`}
         >
+          {/* Phones: the page number sits in front of the title, on one line. */}
+          <span className="mr-2 font-sans text-xs text-muted tabular-nums lg:hidden">
+            {index + 1}/{total}
+          </span>
           {page.step.kind === 'history' ? `How “${page.step.text}” has changed` : page.step.text}
         </h2>
       </div>

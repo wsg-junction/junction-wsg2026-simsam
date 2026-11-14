@@ -687,6 +687,58 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave, initial
     }
   }
 
+  // Phones and tablets: one strip of views instead of stacked controls.
+  const [styleMenu, setStyleMenu] = useState(false);
+  useEffect(() => {
+    if (!styleMenu) return;
+    const close = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setStyleMenu(false);
+        document.querySelector<HTMLButtonElement>('[aria-controls="page-style-menu"]')?.focus();
+      }
+    };
+    window.addEventListener('keydown', close);
+    return () => window.removeEventListener('keydown', close);
+  }, [styleMenu]);
+  useEffect(() => setStyleMenu(false), [mobileTab, mainTab, desktop]);
+  const mobileViews: { key: string; label: string; current: boolean; busy?: boolean; open: () => void }[] = [
+    {
+      key: 'pages',
+      label: 'Pages',
+      current: mobileTab === 'research' && mainTab === 'pages',
+      open: () => {
+        setMainTab('pages');
+        setMobileTab('research');
+      },
+    },
+    ...(deepOn
+      ? [
+          {
+            key: 'deep',
+            label: 'Deep research',
+            current: mobileTab === 'research' && mainTab === 'deep',
+            busy: deepRun?.status === 'running',
+            open: () => {
+              setMainTab('deep');
+              setMobileTab('research');
+            },
+          },
+        ]
+      : []),
+    ...sideTabs
+      .filter((t) => t !== 'chat')
+      .map((t) => ({
+        key: t,
+        label: SIDE_LABEL[t],
+        current: mobileTab === 'side' && sideTab === t,
+        busy: sideBadges[t]?.busy,
+        open: () => {
+          setMobileTab('side');
+          setSideTab(t);
+        },
+      })),
+  ];
+
   const goToPage = (index: number) => {
     setMobileTab('research');
     canvas.current?.scrollToPage(index);
@@ -694,75 +746,131 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave, initial
 
   return (
     <div className="flex h-full flex-col">
-      <header className="flex items-center justify-between gap-3 border-b border-separator bg-background px-4 py-2.5 sm:px-6">
-        <h1 className="min-w-0 truncate text-sm text-muted max-sm:hidden">
-          <span className="sr-only">Exploration: </span>
-          {initialSteps[0].text}
-        </h1>
-        <div className="flex shrink-0 items-center gap-2 max-sm:w-full max-sm:flex-wrap max-sm:justify-between max-sm:gap-y-2">
-          {deepOn && (
-            <div role="group" aria-label="Main view" className="flex rounded-full bg-default p-0.5">
-              {(['pages', 'deep'] as const).map((t) => (
+      <header className="shrink-0 border-b border-separator bg-background">
+        {/* Wide screens: the exploration's question, the main view, the page style and Save. */}
+        <div className="flex items-center justify-between gap-3 px-6 py-2.5 max-lg:hidden">
+          <h1 className="min-w-0 truncate text-sm text-muted">
+            <span className="sr-only">Exploration: </span>
+            {initialSteps[0].text}
+          </h1>
+          <div className="flex shrink-0 items-center gap-2">
+            {deepOn && (
+              <div role="group" aria-label="Main view" className="flex rounded-full bg-default p-0.5">
+                {(['pages', 'deep'] as const).map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    aria-pressed={mainTab === t}
+                    onClick={() => setMainTab(t)}
+                    className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-sm whitespace-nowrap outline-none focus-visible:ring-2 focus-visible:ring-focus ${
+                      mainTab === t ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted'
+                    }`}
+                  >
+                    {t === 'pages' ? 'Pages' : 'Deep research'}
+                    {t === 'deep' && deepRun?.status === 'running' && (
+                      <span aria-label="(researching)" className="size-2 animate-pulse rounded-full bg-accent motion-reduce:animate-none" />
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
+            <div role="group" aria-label="Page style" className={`flex rounded-full bg-default p-0.5 ${mainTab === 'deep' ? 'hidden' : ''}`}>
+              {(['detailed', 'compact'] as const).map((m) => (
                 <button
-                  key={t}
+                  key={m}
                   type="button"
-                  aria-pressed={mainTab === t}
-                  onClick={() => {
-                    setMainTab(t);
-                    setMobileTab('research');
-                  }}
-                  className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-sm whitespace-nowrap outline-none focus-visible:ring-2 focus-visible:ring-focus ${
-                    mainTab === t ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted'
+                  aria-pressed={mode === m}
+                  onClick={() => setMode(m)}
+                  className={`rounded-full px-3 py-1 text-sm outline-none focus-visible:ring-2 focus-visible:ring-focus ${
+                    mode === m ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted'
                   }`}
                 >
-                  {t === 'pages' ? 'Pages' : 'Deep research'}
-                  {t === 'deep' && deepRun?.status === 'running' && (
-                    <span aria-label="(researching)" className="size-2 animate-pulse rounded-full bg-accent motion-reduce:animate-none" />
-                  )}
+                  {m === 'detailed' ? 'Detailed' : 'Compact'}
                 </button>
               ))}
             </div>
-          )}
-          <div role="group" aria-label="Page style" className={`flex rounded-full bg-default p-0.5 ${mainTab === 'deep' ? 'hidden' : ''}`}>
-            {(['detailed', 'compact'] as const).map((m) => (
-              <button
-                key={m}
-                type="button"
-                aria-pressed={mode === m}
-                onClick={() => setMode(m)}
-                className={`rounded-full px-3 py-1 text-sm outline-none focus-visible:ring-2 focus-visible:ring-focus ${
-                  mode === m ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted'
-                }`}
-              >
-                {m === 'detailed' ? 'Detailed' : 'Compact'}
-              </button>
-            ))}
+            <Button size="sm" variant="secondary" onPress={save} isPending={saving}>
+              {isSaved ? 'Saved' : saved ? 'Save changes' : 'Save'}
+            </Button>
           </div>
-          <div role="group" aria-label="Show" className="flex max-w-full overflow-x-auto rounded-full bg-default p-0.5 [scrollbar-width:none] lg:hidden">
-            {(['research', ...sideTabs.filter((t) => t !== 'chat')] as const).map((tab) => {
-              const pressed = tab === 'research' ? mobileTab === 'research' : mobileTab === 'side' && sideTab === tab;
-              return (
-                <button
-                  key={tab}
-                  type="button"
-                  aria-pressed={pressed}
-                  onClick={() => {
-                    if (tab === 'research') return setMobileTab('research');
-                    setMobileTab('side');
-                    setSideTab(tab);
-                  }}
-                  className={`shrink-0 rounded-full px-3 py-1 text-sm whitespace-nowrap max-sm:px-2.5 outline-none focus-visible:ring-2 focus-visible:ring-focus ${
-                    pressed ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted'
-                  }`}
-                >
-                  {tab === 'research' ? 'Research' : SIDE_LABEL[tab]}
-                </button>
-              );
-            })}
-          </div>
-          <Button size="sm" variant="secondary" onPress={save} isPending={saving}>
-            {isSaved ? 'Saved' : saved ? 'Save changes' : 'Save'}
+        </div>
+
+        {/*
+          Phones and tablets: one row. Every view is a tab in a strip that scrolls
+          sideways (pages, deep research, then the side panels), with Save and a
+          menu for the page style at the end.
+        */}
+        <div className="flex items-center gap-1 py-1.5 pr-2 pl-1 lg:hidden">
+          <nav aria-label="Views" className="min-w-0 flex-1">
+            <ul className="flex overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+              {mobileViews.map((v) => (
+                <li key={v.key} className="shrink-0">
+                  <button
+                    type="button"
+                    aria-current={v.current ? 'page' : undefined}
+                    onClick={v.open}
+                    className={`relative inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm whitespace-nowrap outline-none focus-visible:ring-2 focus-visible:ring-focus ${
+                      v.current ? 'bg-default font-medium text-foreground' : 'text-muted'
+                    }`}
+                  >
+                    {v.label}
+                    {v.busy && <span aria-label="(working)" className="size-1.5 animate-pulse rounded-full bg-accent motion-reduce:animate-none" />}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </nav>
+          <Button size="sm" variant="secondary" onPress={save} isPending={saving} className="shrink-0">
+            {isSaved ? 'Saved' : 'Save'}
           </Button>
+          {mainTab === 'pages' && mobileTab === 'research' && (
+            <div className="relative shrink-0">
+              <Button
+                isIconOnly
+                size="sm"
+                variant="ghost"
+                aria-label="Page style"
+                aria-expanded={styleMenu}
+                aria-controls="page-style-menu"
+                onPress={() => setStyleMenu((o) => !o)}
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+                  <circle cx="5" cy="12" r="1.8" />
+                  <circle cx="12" cy="12" r="1.8" />
+                  <circle cx="19" cy="12" r="1.8" />
+                </svg>
+              </Button>
+              {styleMenu && (
+                <>
+                  <div className="fixed inset-0 z-40" aria-hidden onClick={() => setStyleMenu(false)} />
+                  <div
+                    id="page-style-menu"
+                    role="group"
+                    aria-label="Page style"
+                    className="absolute top-full right-0 z-50 mt-1 flex w-44 flex-col rounded-lg border border-border bg-overlay p-1 shadow-lg"
+                  >
+                    {(['detailed', 'compact'] as const).map((m) => (
+                      <button
+                        key={m}
+                        type="button"
+                        aria-pressed={mode === m}
+                        onClick={() => {
+                          setMode(m);
+                          setStyleMenu(false);
+                        }}
+                        className={`flex items-center justify-between rounded-md px-3 py-2 text-left text-sm outline-none hover:bg-default focus-visible:ring-2 focus-visible:ring-focus ${
+                          mode === m ? 'font-medium text-foreground' : 'text-muted'
+                        }`}
+                      >
+                        {m === 'detailed' ? 'Detailed pages' : 'Compact pages'}
+                        {mode === m && <span aria-hidden>✓</span>}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
         </div>
       </header>
 

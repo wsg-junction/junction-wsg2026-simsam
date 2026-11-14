@@ -111,12 +111,17 @@ export const ResearchCanvas = forwardRef<ResearchCanvasHandle, Props>(function R
             aria-label={`Researching ${pending.text}`}
             className="min-h-full"
           >
-            <header className="sticky top-0 z-10 border-b border-separator bg-background py-4">
+            <header className="sticky top-0 z-10 border-b border-separator bg-background py-2 lg:py-4">
               <div className={PAGE_COLUMN}>
-                <p className="text-sm text-muted">
+                <p className="text-sm text-muted max-lg:hidden">
                   Page {pages.length + 1} of {total}
                 </p>
-                <h2 className="mt-1 font-serif text-2xl leading-snug font-normal sm:text-3xl">{pending.text}</h2>
+                <h2 className="font-serif leading-snug font-normal max-lg:truncate max-lg:text-lg lg:mt-1 lg:text-3xl">
+                  <span className="mr-2 font-sans text-xs text-muted tabular-nums lg:hidden">
+                    {pages.length + 1}/{total}
+                  </span>
+                  {pending.text}
+                </h2>
               </div>
             </header>
             <div className={`flex flex-col gap-4 pt-8 ${PAGE_COLUMN}`}>

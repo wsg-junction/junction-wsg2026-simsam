@@ -44,7 +44,7 @@ export function GraphPanel({ state, onDive, onRetry, onCollapse }: Props) {
       </header>
       {center && (
         <p className="px-5 text-sm text-muted">
-          Each column is one step further from the center. Drag to pan, scroll to zoom.
+          Lines join related topics. Drag to pan or move a topic, scroll to zoom.
         </p>
       )}
 

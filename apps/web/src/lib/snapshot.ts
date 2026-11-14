@@ -30,7 +30,9 @@ export function takeSnapshot(s: ExplorationState): ExplorationSnapshot {
   return {
     version: 1,
     pages: s.pages,
-    entries: s.entries.filter((e) => e.status === 'done').map((e) => (e.status === 'done' ? { ...e, writing: false } : e)),
+    entries: s.entries
+      .filter((e) => e.status === 'done' || e.status === 'context')
+      .map((e) => (e.status === 'done' ? { ...e, writing: false } : e)),
     answers: keep(s.answers, (a) => a.status === 'done' || a.status === 'off'),
     briefs: keep(s.briefs, (b) => b.status === 'ready'),
     graphs: keep(s.graphs, (g) => g.status === 'ready' && !g.growing),

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '@heroui/react';
 import type { ExplorationStep, PriorTurn } from '@simsam/models';
-import { aiAvailable, fetchBrief, fetchContext, planSources, rewriteQuery, serverFeatures, streamAnswer } from '../lib/ai';
+import { aiAvailable, fetchBrief, fetchContext, planSources, rewriteQuery, routeQuestion, serverFeatures, streamAnswer } from '../lib/ai';
 import {
   HistoryUnavailableError,
   historyTarget,
@@ -16,7 +16,7 @@ import {
 } from '../lib/research';
 import { fetchArticleTimeline, TimelineUnavailableError } from '../lib/history';
 import { buildGraph, MAX_DEPTH, NoResultsError } from '../lib/wikipedia';
-import { ChatCenter, type ChatEntry } from './ChatCenter';
+import { ChatCenter, ChatComposer, ChatLog, type AskMode, type ChatEntry } from './ChatCenter';
 import { ContextPanel, type ContextEntry } from './ContextPanel';
 import { contentSignature, takeSnapshot, type ExplorationSnapshot, type ExplorationState } from '../lib/snapshot';
 import { HistoryPanel, type TimelineState } from './HistoryPanel';
@@ -71,6 +71,37 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave }: Props
   const [saving, setSaving] = useState(false);
   const [mobileTab, setMobileTab] = useState<'research' | 'side'>('research');
   const [sideTab, setSideTab] = useState<SideTab>('map');
+  const [chatDock, setChatDockState] = useState<'center' | 'side'>(() => {
+    try {
+      return localStorage.getItem('atlas-chat-dock') === 'side' ? 'side' : 'center';
+    } catch {
+      return 'center';
+    }
+  });
+  const [askMode, setAskModeState] = useState<AskMode>(() => {
+    try {
+      const v = localStorage.getItem('atlas-ask-mode');
+      return v === 'articles' || v === 'context' ? v : 'auto';
+    } catch {
+      return 'auto';
+    }
+  });
+  const setAskMode = (next: AskMode) => {
+    setAskModeState(next);
+    try {
+      localStorage.setItem('atlas-ask-mode', next);
+    } catch {
+      /* the choice just won't persist */
+    }
+  };
+  // The side panel exists beside the canvas only on wide screens.
+  const [desktop, setDesktop] = useState(() => window.matchMedia('(min-width: 1024px)').matches);
+  useEffect(() => {
+    const m = window.matchMedia('(min-width: 1024px)');
+    const on = () => setDesktop(m.matches);
+    m.addEventListener('change', on);
+    return () => m.removeEventListener('change', on);
+  }, []);
   const [mode, setModeState] = useState<ViewMode>(storedMode);
   const [mapCollapsed, setMapCollapsedState] = useState(() => {
     try {
@@ -307,7 +338,6 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave }: Props
     pages.forEach((_, i) => void ensureContent(i, mode));
   }, [mode, pages, ensureContent]);
 
-  const ask = (text: string) => run({ kind: 'question', text });
   const dive = (title: string) => {
     setMobileTab('research');
     run({ kind: 'dive', text: title });
@@ -381,13 +411,119 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave }: Props
   }, [corpusOn, historyTitle, timelineAttempt]);
   const activeTimeline = historyTitle ? timelines[historyTitle] : undefined;
 
-  const pending = entries.find((e) => e.status === 'pending');
+  // The canvas shows a placeholder page only once a question is going to articles;
+  // while Auto is still deciding, the question waits in the chat alone.
+  const pending = entries.find((e) => e.status === 'pending' && !e.routing);
   const activeContexts = (activePage && contexts[activePage.id]) || [];
-  const sideTabs: SideTab[] = ['map', ...(webOn ? (['context'] as const) : []), ...(corpusOn ? (['history'] as const) : [])];
+
+  // The chat sits in the middle of the canvas, or in the side panel to leave the
+  // canvas for reading. Docked only beside the canvas (wide screens, panel open).
+  const chatDocked = chatDock === 'side' && desktop && !mapCollapsed;
+  const toggleDock = () => {
+    const next = chatDock === 'side' ? 'center' : 'side';
+    setChatDockState(next);
+    try {
+      localStorage.setItem('atlas-chat-dock', next);
+    } catch {
+      /* the choice just won't persist */
+    }
+    if (next === 'side') {
+      setSideTab('chat');
+      setMapCollapsed(false);
+    }
+  };
+  const revealSide = (tab: SideTab) => {
+    setSideTab(tab);
+    setMapCollapsed(false);
+    if (!desktop) setMobileTab('side');
+  };
+
+  const activeRef = useRef(activePage);
+  activeRef.current = activePage;
+  const askContext = (text: string, page: ResearchPage, query: string | null, existingId?: number) => {
+    const cid = ++contextId;
+    const id = existingId ?? ++entryId;
+    const entry: ChatEntry = {
+      id,
+      step: { kind: 'question', text },
+      status: 'context',
+      page: pagesRef.current.indexOf(page),
+      pageId: page.id,
+      contextId: cid,
+    };
+    setEntries((list) => (list.some((e) => e.id === id) ? list.map((e) => (e.id === id ? entry : e)) : [...list, entry]));
+    loadContext(page, { id: cid, question: text, auto: false, state: { status: 'loading' } }, query ?? undefined);
+    revealSide('context');
+  };
+  const ask = async (text: string, how: AskMode) => {
+    const page = activeRef.current;
+    if (how === 'context' && page) return askContext(text, page, null);
+    if (chatDocked) setSideTab('chat');
+    if (how === 'auto' && webOn && page) {
+      // Show the question at once; the AI decides where it goes in about a second.
+      const id = ++entryId;
+      setEntries((list) => [...list, { id, step: { kind: 'question', text }, status: 'pending', routing: true }]);
+      const routed = await routeQuestion({ question: text, topic: page.focus, history: priorTurns(pagesRef.current.length) });
+      if (routed?.route === 'context') return askContext(text, page, routed.query, id);
+      return run({ kind: 'question', text }, id);
+    }
+    run({ kind: 'question', text });
+  };
+  const retry = (entry: ChatEntry) => {
+    if (entry.status === 'context') {
+      const page = pagesRef.current.find((p) => p.id === entry.pageId);
+      const ctx = contexts[entry.pageId]?.find((c) => c.id === entry.contextId);
+      if (page && ctx) loadContext(page, ctx);
+      return;
+    }
+    run(entry.step, entry.id);
+  };
+
+  const sideTabs: SideTab[] = [
+    ...(chatDocked ? (['chat'] as const) : []),
+    'map',
+    ...(webOn ? (['context'] as const) : []),
+    ...(corpusOn ? (['history'] as const) : []),
+  ];
+  const shownTab: SideTab = sideTabs.includes(sideTab) ? sideTab : 'map';
+  // Every tab, also while the panel is collapsed (the chat counts when it's set to dock there).
+  const railTabs: SideTab[] = [
+    ...(chatDock === 'side' && desktop ? (['chat'] as const) : []),
+    'map',
+    ...(webOn ? (['context'] as const) : []),
+    ...(corpusOn ? (['history'] as const) : []),
+  ];
+  const openTab = (tab: SideTab) => {
+    setSideTab(tab);
+    setMapCollapsed(false);
+    if (!desktop) setMobileTab('side');
+  };
+  // Alt+1, Alt+2, ... open the side panel's tabs, collapsed or not.
+  const railRef = useRef({ railTabs, openTab });
+  railRef.current = { railTabs, openTab };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.altKey || e.ctrlKey || e.metaKey || !/^Digit[1-9]$/.test(e.code)) return;
+      const tab = railRef.current.railTabs[Number(e.code.slice(5)) - 1];
+      if (!tab) return;
+      e.preventDefault();
+      railRef.current.openTab(tab);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+  const shortcutOf = (tab: SideTab) => {
+    const i = railTabs.indexOf(tab);
+    return i === -1 ? undefined : `Alt+${i + 1}`;
+  };
   const sideName = sideTabs.length === 1 ? 'Map' : sideTabs.map((t) => SIDE_LABEL[t].toLowerCase()).join(', ').replace(/^m/, 'M').replace(/, ([^,]*)$/, ' and $1');
 
-  // In the chat, a page's reply is its AI answer once there is one.
+  // The chat carries the AI: in detailed mode each page's full answer (cited)
+  // appears here, not on the page, so the Wikipedia text never waits for it.
   const chatEntries: ChatEntry[] = entries.map((entry) => {
+    if (entry.status === 'context') {
+      return { ...entry, state: contexts[entry.pageId]?.find((c) => c.id === entry.contextId)?.state };
+    }
     if (entry.status !== 'done') return entry;
     const page = pages[entry.page];
     if (page?.history) return { ...entry, reply: withoutCitations(page.history.brief.headline) };
@@ -396,11 +532,36 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave }: Props
       if (!brief || brief.status === 'loading') return { ...entry, reply: '', writing: true };
       return brief.byAi ? { ...entry, reply: withoutCitations(brief.brief.headline) } : entry;
     }
-    const answer = page && answers[page.id];
-    if (!answer || answer.status === 'off' || answer.status === 'error') return entry;
-    if (answer.status === 'waiting' || answer.status === 'thinking') return { ...entry, reply: '', writing: true };
-    return { ...entry, reply: withoutCitations(answer.text), writing: answer.status === 'writing' };
+    return { ...entry, answer: page && answers[page.id], pageId: page?.id, sourceCount: page?.sources.length };
   });
+  const chatBusy = chatEntries.some(
+    (e) =>
+      e.status === 'pending' ||
+      (e.status === 'done' && (e.writing || (e.answer && ['waiting', 'thinking', 'writing'].includes(e.answer.status)))),
+  );
+  /** A dot on a tab when it has something for the page in view; it pulses while loading. */
+  const sideBadges: Partial<Record<SideTab, { busy: boolean; count: number }>> = {
+    chat: { busy: chatBusy, count: 0 },
+    context: { busy: activeContexts.some((e) => e.state.status === 'loading'), count: activeContexts.length },
+    history: {
+      busy: activeTimeline?.status === 'loading',
+      count: activeTimeline?.status === 'ready' ? activeTimeline.timeline.changes.length : 0,
+    },
+  };
+  const logProps = {
+    entries: chatEntries,
+    onRetry: retry,
+    onRetryAnswer: (i: number) => void answerPage(i),
+    onGoToPage: (i: number) => goToPage(i),
+    onOpenContext: () => revealSide('context'),
+  };
+  const composerProps = {
+    onAsk: (q: string, how: AskMode) => void ask(q, how),
+    mode: askMode,
+    onModeChange: setAskMode,
+    modes: webOn,
+    onToggleDock: toggleDock,
+  };
   const steps = pages.map((p) => p.step);
   // Saved means: nothing finished since the last save (a new page, answer, map, context or history).
   const state: ExplorationState = { pages, entries, answers, briefs, graphs, contexts, timelines, active };
@@ -451,7 +612,7 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave }: Props
             ))}
           </div>
           <div role="group" aria-label="Show" className="flex rounded-full bg-default p-0.5 lg:hidden">
-            {(['research', ...sideTabs] as const).map((tab) => {
+            {(['research', ...sideTabs.filter((t) => t !== 'chat')] as const).map((tab) => {
               const pressed = tab === 'research' ? mobileTab === 'research' : mobileTab === 'side' && sideTab === tab;
               return (
                 <button
@@ -488,8 +649,6 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave }: Props
             pages={pages}
             mode={mode}
             briefs={briefs}
-            answers={answers}
-            onRetryAnswer={(i) => void answerPage(i)}
             pending={pending?.step}
             active={active}
             onActiveChange={setActive}
@@ -503,7 +662,7 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave }: Props
               </div>
             }
           />
-          <ChatCenter entries={chatEntries} onAsk={ask} onRetry={(e) => run(e.step, e.id)} onGoToPage={goToPage} />
+          {!chatDocked && <ChatCenter log={logProps} composer={composerProps} />}
         </section>
 
         <aside
@@ -512,39 +671,65 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave }: Props
             mapCollapsed ? 'lg:w-14' : 'lg:w-[28rem] xl:w-[32rem]'
           } ${mobileTab === 'research' ? 'max-lg:hidden' : 'max-lg:flex-1'}`}
         >
-          {/* Collapsed (desktop only): a slim rail that brings the map back. */}
+          {/* Collapsed (desktop only): a slim rail with every tab, each opening the panel on that tab. */}
           {mapCollapsed && (
-            <div className="flex h-full flex-col items-center pt-3 max-lg:hidden">
+            <nav aria-label="Side panel" className="flex h-full flex-col items-center gap-1 pt-3 max-lg:hidden">
               <button
                 type="button"
                 onClick={() => setMapCollapsed(false)}
-                aria-label={`Show ${sideName.toLowerCase()}`}
-                className="flex flex-col items-center gap-3 rounded-lg px-2 py-3 text-sm text-muted outline-none hover:bg-default hover:text-foreground focus-visible:ring-2 focus-visible:ring-focus"
+                aria-label={`Expand the side panel (${sideName.toLowerCase()})`}
+                title="Expand the side panel"
+                className="mb-1 flex size-9 items-center justify-center rounded-lg text-muted outline-none hover:bg-default hover:text-foreground focus-visible:ring-2 focus-visible:ring-focus"
               >
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                   <path d="M15 6l-6 6 6 6" />
                 </svg>
-                <span className="[writing-mode:vertical-rl]">{sideName}</span>
               </button>
-            </div>
+              {railTabs.map((tab) => {
+                const badge = sideBadges[tab];
+                return (
+                  <button
+                    key={tab}
+                    type="button"
+                    onClick={() => openTab(tab)}
+                    aria-label={`Open ${SIDE_LABEL[tab]}`}
+                    aria-keyshortcuts={shortcutOf(tab)}
+                    title={`${SIDE_LABEL[tab]} (${shortcutOf(tab)})`}
+                    className={`relative flex flex-col items-center gap-2 rounded-lg px-2 py-2.5 text-sm outline-none hover:bg-default hover:text-foreground focus-visible:ring-2 focus-visible:ring-focus ${
+                      tab === shownTab ? 'text-foreground' : 'text-muted'
+                    }`}
+                  >
+                    <SideIcon tab={tab} />
+                    <span className="[writing-mode:vertical-rl]">{SIDE_LABEL[tab]}</span>
+                    {badge && (badge.busy || badge.count > 0) && (
+                      <span
+                        aria-hidden
+                        className={`absolute top-1.5 right-1.5 size-2 rounded-full bg-accent ${badge.busy ? 'animate-pulse motion-reduce:animate-none' : ''}`}
+                      />
+                    )}
+                  </button>
+                );
+              })}
+            </nav>
           )}
           <div className={`h-full min-w-0 flex-1 flex-col ${mapCollapsed ? 'flex lg:hidden' : 'flex'}`}>
             {sideTabs.length > 1 && (
               <SideTabs
                 tabs={sideTabs}
-                tab={sideTab}
+                tab={shownTab}
                 onTab={setSideTab}
-                badges={{
-                  context: { busy: activeContexts.some((e) => e.state.status === 'loading'), count: activeContexts.length },
-                  history: {
-                    busy: activeTimeline?.status === 'loading',
-                    count: activeTimeline?.status === 'ready' ? activeTimeline.timeline.changes.length : 0,
-                  },
-                }}
+                badges={sideBadges}
+                shortcut={shortcutOf}
                 onCollapse={() => setMapCollapsed(true)}
               />
             )}
-            <div className={`min-h-0 flex-1 flex-col ${sideTab === 'map' || sideTabs.length === 1 ? 'flex' : 'hidden'}`}>
+            {chatDocked && shownTab === 'chat' && (
+              <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+                <h2 className="sr-only">Questions and answers</h2>
+                <ChatLog {...logProps} />
+              </div>
+            )}
+            <div className={`min-h-0 flex-1 flex-col ${shownTab === 'map' || sideTabs.length === 1 ? 'flex' : 'hidden'}`}>
               <GraphPanel
                 state={activePage ? graphs[activePage.id] : undefined}
                 onDive={dive}
@@ -552,7 +737,7 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave }: Props
                 onCollapse={sideTabs.length > 1 ? undefined : () => setMapCollapsed(true)}
               />
             </div>
-            {corpusOn && sideTab === 'history' && (
+            {corpusOn && shownTab === 'history' && (
               <HistoryPanel
                 title={historyTitle}
                 state={activeTimeline}
@@ -562,7 +747,7 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave }: Props
                 }}
               />
             )}
-            {webOn && sideTab === 'context' && (
+            {webOn && shownTab === 'context' && (
               <ContextPanel
                 topic={activePage?.history ? undefined : activePage?.focus}
                 pageQuestion={activePage && !activePage.history ? questionFor(activePage.step) : undefined}
@@ -574,6 +759,12 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave }: Props
                 onRetry={(entry) => activePage && loadContext(activePage, entry)}
               />
             )}
+            {/* Docked: the one input stays at the bottom of the side panel, whichever tab is open. */}
+            {chatDocked && (
+              <div className="border-t border-separator bg-surface">
+                <ChatComposer {...composerProps} docked />
+              </div>
+            )}
           </div>
         </aside>
       </div>
@@ -581,8 +772,8 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave }: Props
   );
 }
 
-type SideTab = 'map' | 'context' | 'history';
-const SIDE_LABEL: Record<SideTab, string> = { map: 'Map', context: 'Context', history: 'History' };
+type SideTab = 'chat' | 'map' | 'context' | 'history';
+const SIDE_LABEL: Record<SideTab, string> = { chat: 'Chat', map: 'Map', context: 'Context', history: 'History' };
 
 /** Map | Context | History, at the top of the side panel, with the collapse control. */
 function SideTabs({
@@ -590,9 +781,11 @@ function SideTabs({
   tab,
   onTab,
   badges,
+  shortcut,
   onCollapse,
 }: {
   tabs: SideTab[];
+  shortcut: (tab: SideTab) => string | undefined;
   tab: SideTab;
   onTab: (tab: SideTab) => void;
   /** A dot when a tab has something for the page in view; it pulses while loading. */
@@ -609,6 +802,8 @@ function SideTabs({
               key={t}
               type="button"
               aria-pressed={tab === t}
+              aria-keyshortcuts={shortcut(t)}
+              title={shortcut(t) ? `${SIDE_LABEL[t]} (${shortcut(t)})` : undefined}
               onClick={() => onTab(t)}
               className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-sm outline-none focus-visible:ring-2 focus-visible:ring-focus ${
                 tab === t ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted'
@@ -631,5 +826,20 @@ function SideTabs({
         </svg>
       </Button>
     </div>
+  );
+}
+
+/** Small icons for the collapsed rail. */
+function SideIcon({ tab }: { tab: SideTab }) {
+  const paths: Record<SideTab, string> = {
+    chat: 'M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z',
+    map: 'M4 12a2 2 0 1 0 4 0a2 2 0 1 0-4 0M16 6a2 2 0 1 0 4 0a2 2 0 1 0-4 0M16 18a2 2 0 1 0 4 0a2 2 0 1 0-4 0M8 11l8-4M8 13l8 4',
+    context: 'M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18zM3 12h18M12 3c2.5 2.5 3.8 5.5 3.8 9s-1.3 6.5-3.8 9c-2.5-2.5-3.8-5.5-3.8-9S9.5 5.5 12 3z',
+    history: 'M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5M12 7v5l3 2',
+  };
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d={paths[tab]} />
+    </svg>
   );
 }

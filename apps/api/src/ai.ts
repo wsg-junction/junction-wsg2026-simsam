@@ -430,3 +430,80 @@ export async function describeTimeline(title: string, from: string, to: string, 
   }
   return { overview: overview || null, byN };
 }
+
+// ---------- One input: articles or context ----------
+
+const ROUTE_SYSTEM = `You route what a reader types in Atlas, a Wikipedia research canvas. The reader is on a page about a topic. Call exactly one tool:
+
+- research_articles: they want Wikipedia articles: a new topic, a person, place, event or idea, an explanation or overview, a follow-up that moves to a different subject, or how a Wikipedia article changed. This builds a new research page.
+- find_context: they want context about the current topic beyond what encyclopedia articles hold: impacts or consequences in a specific field (finance, economy, health, culture...), figures and statistics, analysis, comparisons, opinions, or recent news. This fills the context panel beside the page.
+
+When unsure, choose research_articles.`;
+
+const ROUTE_TOOLS = [
+  {
+    type: 'function' as const,
+    function: {
+      name: 'research_articles',
+      description: 'Build a new research page from Wikipedia articles.',
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'find_context',
+      description: 'Search the web for context on the current topic, for the context panel.',
+      parameters: {
+        type: 'object',
+        properties: { query: { type: 'string', description: 'A specific web search query naming the topic and the angle' } },
+        required: ['query'],
+      },
+    },
+  },
+];
+
+/** Where a typed question should go: a new page of articles, or the context panel. */
+export async function routeQuestion(
+  question: string,
+  topic: string | undefined,
+  history: PriorTurn[],
+  signal?: AbortSignal,
+): Promise<{ route: 'articles' | 'context'; query: string | null }> {
+  if (!client) throw new Error('AI is not configured');
+  const params: NvidiaParams<ChatCompletionCreateParams> = {
+    model: MODEL,
+    messages: [
+      { role: 'system', content: ROUTE_SYSTEM },
+      {
+        role: 'user',
+        content: [
+          `Current page topic: ${topic ?? 'none yet'}`,
+          ...(history.length ? ['Earlier questions:', ...history.slice(-4).map((t) => `- ${t.question}`)] : []),
+          '',
+          `The reader typed: ${question}`,
+        ].join('\n'),
+      },
+    ],
+    tools: ROUTE_TOOLS,
+    tool_choice: 'auto',
+    temperature: 0,
+    max_tokens: 200,
+    stream: false,
+    chat_template_kwargs: { enable_thinking: false },
+  };
+  const completion = await client.chat.completions.create(params as ChatCompletionCreateParams & { stream: false }, {
+    signal,
+  });
+  const call = completion.choices[0]?.message?.tool_calls?.find((c) => c.type === 'function');
+  if (call?.type === 'function' && call.function.name === 'find_context') {
+    let query: string | null = null;
+    try {
+      query = cleanQuery((JSON.parse(call.function.arguments || '{}') as { query?: unknown }).query);
+    } catch {
+      /* the panel builds its own query */
+    }
+    return { route: 'context', query };
+  }
+  return { route: 'articles', query: null };
+}

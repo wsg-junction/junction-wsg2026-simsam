@@ -99,6 +99,21 @@ export interface SourcePlan {
   webQuery: string | null;
 }
 
+/** POST /api/route: where something typed in the chat goes. */
+export interface RouteRequest {
+  question: string;
+  /** The topic of the page in view, if any. */
+  topic?: string;
+  history: PriorTurn[];
+}
+
+export interface RouteResponse {
+  /** "articles" builds a new research page; "context" fills the context panel. */
+  route: 'articles' | 'context';
+  /** For context: a web query naming the topic and angle. */
+  query: string | null;
+}
+
 /** POST /api/context: web context for a page, kept apart from its Wikipedia content. */
 export interface ContextRequest {
   /** What to find context on, e.g. "consequences for the financial sector". */

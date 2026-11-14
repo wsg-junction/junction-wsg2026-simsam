@@ -1,11 +1,11 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type ReactNode } from 'react';
 import { Skeleton } from '@heroui/react';
 import type { ExplorationStep } from '@simsam/models';
-import type { PageAnswer, PageBrief, ResearchPage } from '../lib/research';
+import type { PageBrief, ResearchPage } from '../lib/research';
 import { prefersReducedMotion } from '../lib/motion';
 import { CompactPageView } from './CompactPageView';
 import { Floating } from './Floating';
-import { ResearchPageView } from './ResearchPageView';
+import { PAGE_COLUMN, ResearchPageView } from './ResearchPageView';
 
 export interface ResearchCanvasHandle {
   scrollToPage: (index: number) => void;
@@ -15,8 +15,6 @@ interface Props {
   pages: ResearchPage[];
   mode: 'detailed' | 'compact';
   briefs: Record<string, PageBrief>;
-  answers: Record<string, PageAnswer>;
-  onRetryAnswer: (pageIndex: number) => void;
   /** A step still being researched; shown as a placeholder page at the end. */
   pending?: ExplorationStep;
   active: number;
@@ -28,11 +26,11 @@ interface Props {
 
 /**
  * The research canvas: one page per question or dive, stacked vertically.
- * Scrolling snaps to the start of each page, and the dots on the right jump
- * between pages.
+ * Scrolling is free (no snapping); the dots on the right show the page in view
+ * and jump between pages.
  */
 export const ResearchCanvas = forwardRef<ResearchCanvasHandle, Props>(function ResearchCanvas(
-  { pages, mode, briefs, answers, onRetryAnswer, onHistory, pending, active, onActiveChange, onDive, empty },
+  { pages, mode, briefs, onHistory, pending, active, onActiveChange, onDive, empty },
   ref,
 ) {
   const scroller = useRef<HTMLDivElement>(null);
@@ -82,7 +80,7 @@ export const ResearchCanvas = forwardRef<ResearchCanvasHandle, Props>(function R
 
   return (
     <div className="relative h-full">
-      <div ref={scroller} className="relative h-full snap-y snap-mandatory overflow-y-auto">
+      <div ref={scroller} className="relative h-full overflow-y-auto" style={{paddingBottom: '150px'}}>
         {pages.map((page, i) =>
           // History pages are a timeline in either mode.
           mode === 'compact' || page.history ? (
@@ -101,9 +99,7 @@ export const ResearchCanvas = forwardRef<ResearchCanvasHandle, Props>(function R
             page={page}
             index={i}
             total={total}
-            answer={answers[page.id]}
             onDive={onDive}
-            onRetryAnswer={() => onRetryAnswer(i)}
             onHistory={onHistory}
           />
           ),
@@ -113,15 +109,17 @@ export const ResearchCanvas = forwardRef<ResearchCanvasHandle, Props>(function R
             data-page={pages.length}
             aria-busy
             aria-label={`Researching ${pending.text}`}
-            className="min-h-full snap-start"
+            className="min-h-full"
           >
-            <header className="sticky top-0 z-10 border-b border-separator bg-background px-6 py-4 sm:px-10">
-              <p className="text-sm text-muted">
-                Page {pages.length + 1} of {total}
-              </p>
-              <h2 className="mt-1 font-serif text-2xl leading-snug font-normal sm:text-3xl">{pending.text}</h2>
+            <header className="sticky top-0 z-10 border-b border-separator bg-background py-4">
+              <div className={PAGE_COLUMN}>
+                <p className="text-sm text-muted">
+                  Page {pages.length + 1} of {total}
+                </p>
+                <h2 className="mt-1 font-serif text-2xl leading-snug font-normal sm:text-3xl">{pending.text}</h2>
+              </div>
             </header>
-            <div className="flex max-w-3xl flex-col gap-4 px-6 pt-8 sm:px-10">
+            <div className={`flex flex-col gap-4 pt-8 ${PAGE_COLUMN}`}>
               <Skeleton className="h-64 w-full rounded-xl" />
               <Skeleton className="h-6 w-1/2 rounded" />
               <Skeleton className="h-4 w-full rounded" />

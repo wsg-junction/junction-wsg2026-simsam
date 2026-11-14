@@ -38,6 +38,13 @@ Set `ELEVENLABS_API_KEY` too to have compact briefs read aloud with ElevenLabs
 text to speech (voice and model are configurable, see `.env.example`). The same
 key lets you ask follow-up questions by voice (ElevenLabs Scribe speech to text).
 
+Research pages show Wikipedia only; the AI answer for each page appears in the
+chat, so the articles never wait for it. The chat sits at the bottom of the
+canvas or, with "Move to side panel", in the side panel as a Chat tab with the
+input below every tab. It has one input with **Auto | Articles | Context**:
+Articles makes a new research page, Context fills the Context panel, and Auto
+lets the model decide with a tool call (`POST /api/route`).
+
 Set `CONTEXT_DEV_API_KEY` to add a **Context** panel beside the map, with web
 context from [context.dev](https://docs.context.dev). The research pages and
 their answers stay Wikipedia only; the panel is kept apart. For every question
@@ -91,7 +98,7 @@ It needs `NVIDIA_API_KEY` for the embeddings (`nvidia/nemotron-3.5-embed-1b`,
 
 The topic map comes from MariaDB alone (`POST /api/graph`): each topic's
 neighbours are its nearest articles in `article_vectors`, expanded five steps
-out and laid out left to right by step, with no Wikipedia API calls. Articles
+out and drawn as a force-directed network, with no Wikipedia API calls. Articles
 embedded before `article_vectors` existed are filled in at the end of every
 ingest run, or on their own with `npm run ingest -w api -- --article-vectors`.
 

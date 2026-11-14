@@ -7,6 +7,8 @@ import type {
   Health,
   RewriteRequest,
   RewriteResponse,
+  RouteRequest,
+  RouteResponse,
   SourcePlan,
 } from '@simsam/models';
 
@@ -106,6 +108,21 @@ export async function fetchBrief(body: AnswerRequest, signal?: AbortSignal): Pro
       signal,
     });
     return res.ok ? ((await res.json()) as Brief) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Where a typed question goes (articles or context), or null if the AI can't decide right now. */
+export async function routeQuestion(body: RouteRequest, signal?: AbortSignal): Promise<RouteResponse | null> {
+  try {
+    const res = await fetch('/api/route', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal,
+    });
+    return res.ok ? ((await res.json()) as RouteResponse) : null;
   } catch {
     return null;
   }

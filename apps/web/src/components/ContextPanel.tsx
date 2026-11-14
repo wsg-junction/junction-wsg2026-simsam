@@ -1,5 +1,4 @@
-import { useState } from 'react';
-import { Button, Form, Input, Link, Spinner, TextField } from '@heroui/react';
+import { Button, Link, Spinner } from '@heroui/react';
 import type { ContextResponse } from '@simsam/models';
 import { CitedText } from './Cite';
 
@@ -27,14 +26,6 @@ interface Props {
  * view, and stays apart from the page's Wikipedia content and answer.
  */
 export function ContextPanel({ topic, pageQuestion, entries, onAsk, onRetry }: Props) {
-  const [text, setText] = useState('');
-  const submit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const q = text.trim();
-    if (!q) return;
-    onAsk(q);
-    setText('');
-  };
   const newestFirst = [...entries].reverse();
 
   return (
@@ -44,28 +35,15 @@ export function ContextPanel({ topic, pageQuestion, entries, onAsk, onRetry }: P
         <p className="text-sm text-muted">
           From the web, beside the Wikipedia page. It doesn’t change the page or its answer.
         </p>
-        <Form onSubmit={submit} className="mt-3 flex items-center gap-2">
-          <TextField
-            aria-label={topic ? `Find context on ${topic}` : 'Find context'}
-            value={text}
-            onChange={setText}
-            isDisabled={!topic}
-            className="min-w-0 flex-1"
-          >
-            <Input placeholder="e.g. impact on the financial sector" className="text-base" />
-          </TextField>
-          <Button type="submit" size="sm" variant="secondary" isDisabled={!topic} className="shrink-0">
-            Find context
-          </Button>
-        </Form>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-5 pt-4 pb-6">
         {entries.length === 0 && (
           <div className="flex flex-col items-start gap-3 text-sm">
             <p className="text-muted">
-              Wikipedia stays the main source. Ask here for what articles don’t cover: consequences in one field,
-              figures, analysis or recent developments.
+              Wikipedia stays the main source. For what articles don’t cover (consequences in one field, figures,
+              analysis or recent developments), ask in the chat with Context selected, or with Auto and let the AI
+              decide.
             </p>
             {pageQuestion && topic && (
               <Button size="sm" variant="ghost" onPress={() => onAsk(pageQuestion)} className="h-auto py-1.5 text-left whitespace-normal">

@@ -18,13 +18,15 @@ import type {
   Health,
   NewExploration,
   RewriteRequest,
+  RouteRequest,
+  RouteResponse,
   SavedExploration,
   RewriteResponse,
   SourcePlan,
   ContextRequest,
   ContextResponse,
 } from '@simsam/models';
-import { aiEnabled, createBrief, planSources, rewriteQuery, streamAnswer, summarizeContext } from './ai.js';
+import { aiEnabled, createBrief, planSources, rewriteQuery, routeQuestion, streamAnswer, summarizeContext } from './ai.js';
 import { searchWeb, webSearchEnabled } from './context.js';
 import { corpusArticles, corpusAvailable, corpusGraph, type CorpusGraph, relatedInCorpus, searchCorpus, type CorpusArticle, type CorpusHit, type RankedHit, type SearchCandidate } from './corpus.js';
 import { articleHistory } from './history.js';
@@ -370,6 +372,36 @@ app.post<{ Body: RewriteRequest }>(
     if (!aiEnabled) return reply.code(503).send({ error: 'AI is not configured' });
     const query = await rewriteQuery(req.body.question, req.body.history, AbortSignal.timeout(15_000));
     return { query: query || req.body.question };
+  },
+);
+
+// One chat input: the AI decides (by a tool call) whether the reader wants new
+// articles or context on the current page. Only offered when web search is on.
+app.post<{ Body: RouteRequest }>(
+  '/api/route',
+  {
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+    schema: {
+      body: {
+        type: 'object',
+        required: ['question', 'history'],
+        additionalProperties: false,
+        properties: {
+          question: { type: 'string', minLength: 1, maxLength: 500 },
+          topic: { type: 'string', maxLength: 255 },
+          history: historySchema,
+        },
+      },
+    },
+  },
+  async (req, reply): Promise<RouteResponse | void> => {
+    if (!aiEnabled || !webSearchEnabled) return { route: 'articles', query: null };
+    try {
+      return await routeQuestion(req.body.question, req.body.topic, req.body.history, AbortSignal.timeout(10_000));
+    } catch (err) {
+      req.log.warn(err, 'routing failed');
+      return { route: 'articles', query: null };
+    }
   },
 );
 

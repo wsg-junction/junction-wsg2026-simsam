@@ -7,7 +7,7 @@ import { setVoiceOn, useVoiceAvailable, useVoicePreference, voiceNarrator } from
 import { prefersReducedMotion } from '../lib/motion';
 import { CitedText, withoutCitations } from './Cite';
 import { HistoryChart } from './HistoryChart';
-import { PageHeader } from './ResearchPageView';
+import { PAGE_COLUMN, PageHeader } from './ResearchPageView';
 
 interface Props {
   page: ResearchPage;
@@ -31,10 +31,10 @@ export function CompactPageView({ page, index, total, brief, isActive, onHistory
       data-page={index}
       id={page.id}
       aria-labelledby={`${page.id}-title`}
-      className="relative min-h-full snap-start"
+      className="relative min-h-full"
     >
       <PageHeader page={page} index={index} total={total} />
-      <div className="flex max-w-3xl flex-col gap-8 px-6 pt-8 pb-44 pr-14 sm:px-10 sm:pr-16">
+      <div className={`flex flex-col gap-8 pt-8 pb-44 ${PAGE_COLUMN}`}>
         {!brief || brief.status === 'loading' ? (
           <BriefSkeleton />
         ) : (

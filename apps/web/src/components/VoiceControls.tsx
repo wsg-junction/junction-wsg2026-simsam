@@ -1,6 +1,12 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Button, Spinner } from '@heroui/react';
-import { useSharedHandsFree, type HandsFreeState } from '../lib/handsfree';
+import {
+  setVoiceThreshold,
+  THRESHOLD_RANGE,
+  useSharedHandsFree,
+  useVoiceThreshold,
+  type HandsFreeState,
+} from '../lib/handsfree';
 import { useVoiceAvailable, useVoiceQuestion, type VoiceQuestionState } from '../lib/voice';
 
 /**
@@ -74,6 +80,7 @@ export function VoiceStatusRows({ controls, rowClassName }: { controls: Controls
           subscribeLevel={handsFree.subscribeLevel}
           onTurnOff={handsFree.toggle}
           onDismiss={handsFree.dismiss}
+          onCalibrate={handsFree.calibrate}
           className={rowClassName}
         />
       )}
@@ -131,20 +138,24 @@ function VoiceStatus({
   );
 }
 
-/** Hands-free: what it's doing, a live microphone meter, and a way to turn it off. */
+/** Hands-free: what it's doing, the live level against the threshold, and controls. */
 function HandsFreeStatus({
   state,
   subscribeLevel,
   onTurnOff,
   onDismiss,
+  onCalibrate,
   className,
 }: {
   state: Exclude<HandsFreeState, { status: 'off' }>;
   subscribeLevel: (fn: (level: number) => void) => () => void;
   onTurnOff: () => void;
   onDismiss: () => void;
+  onCalibrate: () => void;
   className: string;
 }) {
+  const [adjusting, setAdjusting] = useState(false);
+  const threshold = useVoiceThreshold();
   const message =
     state.status === 'starting'
       ? 'Starting the microphone…'
@@ -156,52 +167,115 @@ function HandsFreeStatus({
             ? (state.note ?? 'Hands-free is on. Just ask; you can also talk over the reading to interrupt it.')
             : state.message;
   return (
-    <div data-handsfree={state.status} className={`flex flex-wrap items-center gap-x-3 gap-y-1 text-sm ${className}`}>
-      {state.status !== 'error' && <LevelMeter subscribe={subscribeLevel} active={state.status === 'hearing'} />}
-      <span aria-live="polite" className={state.status === 'listening' ? 'text-muted' : ''}>
-        {state.status === 'transcribing' && <Spinner size="sm" aria-hidden className="mr-2 align-middle" />}
-        {message}
-      </span>
-      {state.status === 'error' ? (
-        <button type="button" onClick={onDismiss} className={link}>
-          Dismiss
-        </button>
-      ) : (
-        <button type="button" onClick={onTurnOff} className={link}>
-          Turn off
-        </button>
+    <div data-handsfree={state.status} className={`flex flex-col gap-3 text-sm ${className}`}>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        {state.status !== 'error' && (
+          <LevelMeter subscribe={subscribeLevel} threshold={threshold} active={state.status === 'hearing'} />
+        )}
+        <span aria-live="polite" className={state.status === 'listening' ? 'text-muted' : ''}>
+          {state.status === 'transcribing' && <Spinner size="sm" aria-hidden className="mr-2 align-middle" />}
+          {message}
+        </span>
+        {state.status === 'error' ? (
+          <button type="button" onClick={onDismiss} className={link}>
+            Dismiss
+          </button>
+        ) : (
+          <>
+            <button
+              type="button"
+              aria-expanded={adjusting}
+              aria-controls="voice-threshold"
+              onClick={() => setAdjusting((a) => !a)}
+              className={link}
+            >
+              {adjusting ? 'Done' : 'Adjust'}
+            </button>
+            <button type="button" onClick={onTurnOff} className={link}>
+              Turn off
+            </button>
+          </>
+        )}
+      </div>
+
+      {adjusting && state.status !== 'error' && (
+        <div id="voice-threshold" className="flex flex-col gap-2">
+          <label htmlFor="voice-threshold-range" className="font-medium">
+            Only listen to voices louder than the marker
+          </label>
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-muted">Quiet</span>
+            <input
+              id="voice-threshold-range"
+              type="range"
+              min={THRESHOLD_RANGE.min}
+              max={THRESHOLD_RANGE.max}
+              step={1}
+              value={threshold}
+              onChange={(e) => setVoiceThreshold(Number(e.target.value))}
+              aria-valuetext={`${threshold} decibels`}
+              className="w-48 accent-[var(--accent)]"
+            />
+            <span className="text-xs text-muted">Loud</span>
+            <span className="w-14 text-right text-xs tabular-nums text-muted">{threshold} dB</span>
+          </div>
+          <p className="text-muted">
+            Speak normally and watch the bar: it should cross the marker when you talk and stay below it when
+            you don’t.{' '}
+            <button type="button" onClick={onCalibrate} className={link}>
+              Set from room noise
+            </button>
+          </p>
+        </div>
       )}
     </div>
   );
 }
 
-/** Five bars following the microphone level, updated outside React to stay cheap. */
-function LevelMeter({ subscribe, active }: { subscribe: (fn: (level: number) => void) => () => void; active: boolean }) {
-  const bars = useRef<(HTMLSpanElement | null)[]>([]);
+/** The microphone level as a bar, with the threshold marked; updated outside React to stay cheap. */
+function LevelMeter({
+  subscribe,
+  threshold,
+  active,
+}: {
+  subscribe: (fn: (level: number) => void) => () => void;
+  threshold: number;
+  active: boolean;
+}) {
+  const fill = useRef<HTMLSpanElement>(null);
+  const thresholdRef = useRef(threshold);
+  thresholdRef.current = threshold;
   useEffect(
     () =>
       subscribe((level) => {
-        const db = 20 * Math.log10(Math.max(level, 1e-4)); // about -80 (silence) to 0
-        const fill = Math.max(0, Math.min(1, (db + 60) / 45));
-        bars.current.forEach((bar, i) => {
-          if (bar) bar.style.transform = `scaleY(${Math.max(0.2, Math.min(1, fill * (1 - Math.abs(i - 2) * 0.18)))})`;
-        });
+        const db = 20 * Math.log10(Math.max(level, 1e-5));
+        const el = fill.current;
+        if (!el) return;
+        el.style.transform = `scaleX(${meterPosition(db)})`;
+        el.dataset.loud = db >= thresholdRef.current ? 'true' : 'false';
       }),
     [subscribe],
   );
   return (
-    <span aria-hidden className="inline-flex h-4 items-center gap-0.5">
-      {[0, 1, 2, 3, 4].map((i) => (
-        <span
-          key={i}
-          ref={(el) => void (bars.current[i] = el)}
-          className={`block h-4 w-1 origin-center rounded-full ${active ? 'bg-accent' : 'bg-[var(--field-line)]'}`}
-          style={{ transform: 'scaleY(0.2)' }}
-        />
-      ))}
+    <span aria-hidden className="relative inline-block h-2 w-28 overflow-hidden rounded-full bg-[var(--field-line)]/40">
+      <span
+        ref={fill}
+        data-loud="false"
+        className={`absolute inset-y-0 left-0 w-full origin-left rounded-full bg-[var(--field-line)] data-[loud=true]:bg-accent ${
+          active ? 'bg-accent' : ''
+        }`}
+        style={{ transform: 'scaleX(0)' }}
+      />
+      <span
+        className="absolute inset-y-0 w-0.5 -translate-x-1/2 bg-foreground"
+        style={{ left: `${meterPosition(threshold) * 100}%` }}
+      />
     </span>
   );
 }
+
+/** Where a level sits on the meter: -70 dBFS (silence) at the left, -10 dBFS at the right. */
+const meterPosition = (db: number) => Math.max(0, Math.min(1, (db + 70) / 60));
 
 function WaveIcon() {
   return (

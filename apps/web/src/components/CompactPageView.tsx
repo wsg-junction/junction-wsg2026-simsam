@@ -6,6 +6,7 @@ import { pacedNarrator, usePlayback, type Playback } from '../lib/playback';
 import { setVoiceOn, useVoiceAvailable, useVoicePreference, voiceNarrator } from '../lib/voice';
 import { prefersReducedMotion } from '../lib/motion';
 import { CitedText, withoutCitations } from './Cite';
+import { HistoryChart } from './HistoryChart';
 import { PageHeader } from './ResearchPageView';
 
 interface Props {
@@ -15,6 +16,8 @@ interface Props {
   brief?: PageBrief;
   /** The page is the one in view; playback only runs then. */
   isActive: boolean;
+  /** Show how an article changed over time (only when its history is stored). */
+  onHistory?: (title: string) => void;
 }
 
 /**
@@ -22,7 +25,7 @@ interface Props {
  * history, key points otherwise) that plays in one beat at a time. Each beat
  * is plain text the narrator can read out.
  */
-export function CompactPageView({ page, index, total, brief, isActive }: Props) {
+export function CompactPageView({ page, index, total, brief, isActive, onHistory }: Props) {
   return (
     <section
       data-page={index}
@@ -36,6 +39,13 @@ export function CompactPageView({ page, index, total, brief, isActive }: Props) 
           <BriefSkeleton />
         ) : (
           <BriefPlayer page={page} brief={brief.brief} byAi={brief.byAi} isActive={isActive} />
+        )}
+        {onHistory && !page.history && (
+          <div>
+            <Button size="sm" variant="secondary" onPress={() => onHistory(page.focus)}>
+              See how “{page.focus}” changed
+            </Button>
+          </div>
         )}
       </div>
     </section>
@@ -95,7 +105,13 @@ function BriefPlayer({ page, brief, byAi, isActive }: { page: ResearchPage; brie
     <>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-xs text-muted">
-          {byAi ? 'Brief written by AI from the sources below. Check the citations.' : 'Brief from the Wikipedia articles below.'}
+          {page.history
+            ? byAi
+              ? 'Timeline written by AI from the article’s stored versions. Each event links to its edit.'
+              : 'Timeline from the article’s stored versions. Each event links to its edit.'
+            : byAi
+              ? 'Brief written by AI from the sources below. Check the citations.'
+              : 'Brief from the Wikipedia articles below.'}
         </p>
         <Controls playback={playback} count={beats.length} voice={voiceAvailable ? voiceOn : undefined} />
       </div>
@@ -108,6 +124,8 @@ function BriefPlayer({ page, brief, byAi, isActive }: { page: ResearchPage; brie
           className="font-serif text-[1.6rem] leading-snug text-balance sm:text-[1.85rem]"
         />
       </div>
+
+      {page.history && <HistoryChart history={page.history} />}
 
       {brief.layout === 'timeline' ? (
         <TimelineBrief page={page} brief={brief} state={state} playback={playback} itemRefs={itemRefs} />
@@ -301,7 +319,7 @@ function SourceRefs({ page, sources }: { page: ResearchPage; sources: number[] }
             className="inline-flex max-w-full items-center gap-1 truncate rounded-full border border-border px-2 py-0.5 text-xs text-muted outline-none hover:border-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-focus"
           >
             <span className="text-accent tabular-nums">{n}</span>
-            {source.title}
+            {source?.title}
           </a>
         );
       })}
@@ -317,15 +335,18 @@ function SourceChips({ page }: { page: ResearchPage }) {
       </h3>
       <ol className="flex flex-col gap-1 text-sm">
         {page.sources.map((article, i) => (
-          <li key={article.title} id={`${page.id}-source-${i + 1}`} className="flex scroll-mt-28 gap-2">
+          <li key={article.url} id={`${page.id}-source-${i + 1}`} className="flex scroll-mt-28 gap-2">
             <span className="w-5 shrink-0 text-right tabular-nums text-muted">{i + 1}.</span>
             <Link href={article.url} target="_blank" rel="noreferrer" className="text-foreground underline-offset-4 hover:underline">
-              {article.title}, Wikipedia
+              {article.title}
+              {page.history?.changes.length ? ': see the change on Wikipedia' : ', Wikipedia'}
             </Link>
           </li>
         ))}
       </ol>
-      <p className="text-xs text-muted">Article text from Wikipedia, available under CC BY-SA 4.0. Images have their own licenses.</p>
+      <p className="text-xs text-muted">
+        Article text from Wikipedia, available under CC BY-SA 4.0. Images have their own licenses.
+      </p>
     </section>
   );
 }

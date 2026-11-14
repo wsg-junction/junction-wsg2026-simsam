@@ -1,5 +1,73 @@
 # English Wikipedia collection
 
+## Expand the existing collection with full history
+
+```powershell
+node scripts/expand-wikipedia.mjs --limit 30000 --hours 8
+```
+
+This is the recommended command for the expanded collection. It adds sports,
+gaming, science, geography, technology, film/TV, music, arts/literature, society,
+nature and health, while keeping European history, Finland, and computer science.
+The target is 30,000 total unique articles (including existing articles), not
+30,000 additional articles. These are broad category samples, not popularity rankings.
+
+Full public main-slot revision history is always requested by this command.
+Existing article JSON files are never refreshed or overwritten. Their existing
+revision history seeds the historical crawl, which continues further into the past.
+New article files retain the original schema; full histories live separately.
+
+Four workers share a single 500ms request-start interval (about two requests/s),
+maxlag, and a common cooldown for rate-limit/server/network failures. Each request
+has up to eight attempts; failed article/history tasks get up to three queue turns.
+Permanent failures are reported and retried on the next run. Category failures
+preserve their cursor and retry after a cooldown. Never run the legacy and expanded
+fetchers simultaneously against this directory.
+
+Work alternates between discovery, current articles and history. History gets
+three of every four available content-task turns when both queues have work;
+one turn fetches up to 50 revisions, then that article goes to the back of the queue.
+This prevents a heavily edited article from monopolizing the eight-hour budget.
+Discovery starts with well-known topic seed pages, then explores subcategories.
+
+`--hours` stops starting new requests at the deadline. Ctrl+C stops gracefully.
+Rerun the command for another time budget; it resumes unfinished histories and
+reuses completed batches and cached articles. Increasing `--limit` in the same
+directory is supported; changing `--depth` is not. The default User-Agent identifies
+this project's public GitHub repository; override with `--userAgent` if needed.
+`--concurrency` accepts 1–4; `--delay` is a shared interval, not a per-worker delay.
+
+Output in the same `data/wikipedia-en/` directory:
+
+- `articles/<pageid>.json`: existing format; already-downloaded files are reused.
+- `history/<pageid>/seed.json.gz`: revisions reused from the article JSON.
+- `history/<pageid>/batch-000000.json.gz`, etc.: objects with `pageid`, raw
+  `revisions` (including main-slot wikitext) and `next` continuation cursor.
+- `history/<pageid>/state.json`: `revisionCount`, `complete`, `anchorRevisionId`,
+  `oldestTimestamp`, `newestTimestamp`, `contentUnavailable`, and resume cursor.
+- `discovery-expanded.json`: expanded topic discovery state; original
+  `discovery.json` is preserved.
+- `expansion-manifest.json`: progress every ~30 seconds and at completion,
+  including failures and complete/partial coverage notes. Original manifest is preserved.
+
+For ingestion, combine `seed.json.gz` and all `batch-*.json.gz` revision arrays;
+deduplicate on revision ID. Python's `gzip`/`json` or Node's `gunzipSync`/`JSON.parse`
+can read them. Use each revision's actual timestamp for historical queries.
+**Only `complete: true` means the public history was exhausted** through the
+cached anchor revision. Eight hours is a work budget, not a promise to finish
+30,000 full histories. Partial coverage must not be presented as a complete
+point-in-time account. Deleted/suppressed revisions and pre-move archived pages
+may not be accessible through the API. Watch disk usage during large runs.
+
+A `.expand.lock` prevents duplicate expansion processes. A dead process's lock is
+recovered automatically. Logs can be redirected to files with the shell.
+
+```powershell
+node --test scripts/fetch-wikipedia.test.mjs scripts/expand-wikipedia.test.mjs
+```
+
+## Original small-collection fetcher
+
 Requires Node.js 22+; no extra dependencies or API keys. Run from the repository root:
 
 ```powershell

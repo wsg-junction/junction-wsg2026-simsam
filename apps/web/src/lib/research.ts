@@ -1,5 +1,15 @@
-import type { Brief, ExplorationStep } from '@simsam/models';
-import { getArticles, NoResultsError, related, search, toSearchQuery, type Article, type Topic } from './wikipedia';
+import type { ArticleHistory, Brief, ExplorationStep } from '@simsam/models';
+import {
+  getArticles,
+  NoResultsError,
+  related,
+  search,
+  searchCorpus,
+  storedTitle,
+  toSearchQuery,
+  type Article,
+  type Topic,
+} from './wikipedia';
 
 // Turns one step (a question or a dive) into a research page built from
 // Wikipedia articles. Everything here is extractive: each passage shown is
@@ -22,6 +32,81 @@ export interface ResearchPage {
   timeline: TimelineEvent[];
   /** Other search matches, used as the map's first ring. */
   seeds: Topic[];
+  /** For "how has this article changed" pages: the article's stored history. */
+  history?: ArticleHistory;
+}
+
+/** The article isn't in the local collection, so there's no stored history to read. */
+export class HistoryUnavailableError extends Error {}
+
+/**
+ * "How has this article changed over time?": questions about an article's
+ * edit history rather than its subject. Needs a word like "article" or an
+ * explicit "edit history", so "how has computing changed?" stays a normal question.
+ */
+const HISTORY_INTENT =
+  /\b(article|page|entry|wikipedia)\b.*\b(chang|evolv|edit|revis|develop|grown|grew)|\b(chang|evolv|edit|revis)\w*\b.*\b(article|page|entry)\b|\b(edit|revision|version) history\b/i;
+
+export const isHistoryQuestion = (text: string) => HISTORY_INTENT.test(text);
+
+const HISTORY_WORDS =
+  /\b(how|has|have|had|did|does|do|is|was|the|this|that|its|it|of|on|about|for|in|over|time|article|page|entry|wikipedia|changed?|changes|evolved?|developed?|been|edited|edits?|revisions?|revised|versions?|history|grown|grew|throughout|years?|show|me|tell|see)\b/gi;
+
+/**
+ * Which article a history question is about: one it names ("how has the
+ * article on the Hanseatic League changed?"), or else the page before it.
+ */
+export async function historyTarget(question: string, previousFocus: string | undefined, signal?: AbortSignal) {
+  const subject = question
+    .replace(HISTORY_WORDS, ' ')
+    .replace(/[^\p{L}\p{N}\s'-]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (subject.length >= 3) {
+    // An exact title first: it works for every stored article, embedded or not.
+    const exact = await storedTitle(subject, signal);
+    if (exact) return exact;
+    const [hit] = await searchCorpus(subject, 1, signal);
+    if (hit) return hit.title;
+  }
+  return previousFocus;
+}
+
+async function fetchHistory(title: string, signal?: AbortSignal): Promise<ArticleHistory> {
+  const res = await fetch('/api/history', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title }),
+    signal,
+  });
+  if (res.status === 404) throw new HistoryUnavailableError(title);
+  if (!res.ok) throw new Error(`History request failed with ${res.status}`);
+  return (await res.json()) as ArticleHistory;
+}
+
+const editDate = (iso: string) =>
+  new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+
+/** A page about how an article changed: its important edits are the page's sources. */
+async function historyPage(step: ExplorationStep, signal?: AbortSignal): Promise<ResearchPage> {
+  const history = await fetchHistory(step.text, signal);
+  return {
+    id: `page-${++pageCounter}`,
+    step: { kind: 'history', text: history.title },
+    focus: history.title,
+    // With no edits to show (a single stored version), the article itself is the source.
+    sources: history.changes.length
+      ? history.changes.map((c) => ({
+          title: `Edit of ${editDate(c.at)}${c.editor ? ` by ${c.editor}` : ''}`,
+          description: c.summary,
+          extract: c.summary,
+          url: c.diffUrl,
+        }))
+      : [{ title: history.title, description: 'Current version', extract: history.brief.headline, url: history.url }],
+    timeline: [],
+    seeds: [],
+    history,
+  };
 }
 
 const SOURCES_PER_PAGE = 4;
@@ -62,6 +147,11 @@ function buildTimeline(sources: Article[]): TimelineEvent[] {
 
 let pageCounter = 0;
 
+/** After restoring saved pages, new pages must not reuse their ids. */
+export function reservePageIds(ids: string[]) {
+  for (const id of ids) pageCounter = Math.max(pageCounter, Number(id.replace(/^page-/, '')) || 0);
+}
+
 /**
  * @param query A ready-made search query (e.g. a follow-up the AI rewrote to
  *   stand on its own). Without one, the question is turned into a query here.
@@ -72,6 +162,8 @@ export async function research(
   query?: string,
   signal?: AbortSignal,
 ): Promise<ResearchPage> {
+  if (step.kind === 'history') return historyPage(step, signal);
+
   let titles: string[];
   let seeds: Topic[];
 

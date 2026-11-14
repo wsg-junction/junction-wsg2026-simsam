@@ -11,38 +11,64 @@ export const TOPICS = [
 ];
 
 export class WikiClient {
-  constructor({ userAgent, delay = 500, fetchImpl = fetch }) {
+  constructor({ userAgent, delay = 500, fetchImpl = fetch, retries = 6,
+    deadline = Infinity, sleepImpl = sleep }) {
     this.userAgent = userAgent;
     this.delay = delay;
     this.fetchImpl = fetchImpl;
+    this.retries = retries;
+    this.deadline = deadline;
+    this.sleep = sleepImpl;
+    this.gate = Promise.resolve();
+    this.nextRequest = 0;
+    this.cooldown = 0;
+  }
+  async throttle() {
+    // One shared start-rate gate for every worker, including retries.
+    const slot = this.gate.then(async () => {
+      const wait = Math.max(0, this.nextRequest - Date.now(), this.cooldown - Date.now());
+      if (Date.now() + wait >= this.deadline) throw new Error('Time budget reached');
+      await this.sleep(wait);
+      this.nextRequest = Date.now() + this.delay;
+    });
+    this.gate = slot.catch(() => {});
+    return slot;
   }
   async request(params) {
     const url = new URL('https://en.wikipedia.org/w/api.php');
     url.search = new URLSearchParams({ action: 'query', format: 'json', formatversion: '2', maxlag: '5', ...params });
-    for (let attempt = 0; attempt < 6; attempt++) {
-      await sleep(this.delay);
+    for (let attempt = 0; attempt < this.retries; attempt++) {
+      await this.throttle();
       let wait = Math.min(60_000, 1000 * 2 ** attempt);
+      let retryReason = 'server busy';
       try {
         const response = await this.fetchImpl(url, {
           headers: { 'User-Agent': this.userAgent, Accept: 'application/json' },
-          signal: AbortSignal.timeout(60_000),
+          signal: AbortSignal.timeout(Math.max(1, Math.min(60_000, this.deadline - Date.now()))),
         });
-        const retryAfter = Number(response.headers.get('retry-after'));
-        if (Number.isFinite(retryAfter)) wait = Math.max(wait, retryAfter * 1000);
+        const header = response.headers.get('retry-after');
+        if (header) {
+          const retryAfter = Number(header);
+          wait = Math.max(wait, Number.isFinite(retryAfter) ? retryAfter * 1000 : Date.parse(header) - Date.now() || 0);
+        }
         if (!response.ok) {
+          retryReason = `HTTP ${response.status}`;
           if (response.status !== 429 && response.status < 500) throw new Error(`HTTP ${response.status}: ${url}`);
         } else {
           const data = await response.json();
           if (!data.error) return data;
+          retryReason = data.error.code;
           if (!['maxlag', 'ratelimited', 'readonly'].includes(data.error.code)) {
             throw new Error(`Wikipedia API: ${data.error.code}: ${data.error.info}`);
           }
         }
       } catch (error) {
-        if (error.message.startsWith('HTTP ') || error.message.startsWith('Wikipedia API:') || attempt === 5) throw error;
+        retryReason = error.cause?.code ?? error.message;
+        if (error.message.startsWith('HTTP ') || error.message.startsWith('Wikipedia API:') || attempt === this.retries - 1) throw error;
       }
-      if (attempt === 5) throw new Error('Wikipedia API unavailable after six attempts');
-      await sleep(wait);
+      if (attempt === this.retries - 1) throw new Error(`Wikipedia API unavailable after ${this.retries} attempts`);
+      this.cooldown = Math.max(this.cooldown, Date.now() + wait + Math.random() * 250);
+      console.warn(`Wikipedia retry ${attempt + 1}/${this.retries - 1} (${retryReason}); shared backoff ${Math.ceil(wait / 1000)}s`);
     }
   }
   async *pages(params) {

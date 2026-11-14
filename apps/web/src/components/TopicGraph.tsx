@@ -1,40 +1,123 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from 'react';
 import { Button } from '@heroui/react';
-import {
-  forceCollide,
-  forceLink,
-  forceManyBody,
-  forceRadial,
-  forceSimulation,
-  type ForceLink,
-  type Simulation,
-  type SimulationLinkDatum,
-  type SimulationNodeDatum,
-} from 'd3-force';
-import type { GraphEdge, TopicGraph as Graph } from '../lib/wikipedia';
+import type { TopicGraph as Graph } from '../lib/wikipedia';
 import { prefersReducedMotion } from '../lib/motion';
 
-interface SimNode extends SimulationNodeDatum {
+/** Horizontal distance between steps (columns), and vertical distance between rows, in world units. */
+const COL = 210;
+const ROW = 46;
+/** Dot radius by depth, in screen pixels. */
+const DOT = [9, 6, 4.5, 4, 3.5, 3.5];
+const LABEL_SIZE = [16, 13, 12, 11.5, 11, 11];
+/** Labels longer than this are shortened on the map (the full title is in the preview and for screen readers). */
+const LABEL_CHARS = 26;
+const MIN_K = 0.25;
+const MAX_K = 3;
+/** Crossing-reduction passes. */
+const SWEEPS = 6;
+
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+const edgeKey = (a: string, b: string) => (a < b ? `${a}\u0000${b}` : `${b}\u0000${a}`);
+const shorten = (t: string) => (t.length > LABEL_CHARS ? `${t.slice(0, LABEL_CHARS - 1).trimEnd()}…` : t);
+
+interface Placed {
   id: string;
   depth: number;
   x: number;
   y: number;
 }
 
-interface SimLink extends SimulationLinkDatum<SimNode> {
-  kind: GraphEdge['kind'];
+/**
+ * A layered ("topological") layout: the center on the left, one column per
+ * step outward. The map is a tree (each topic hangs off the one it was found
+ * from) plus a few cross links. Children sit in a contiguous block centered on
+ * their parent, so tree lines never cross; sibling order is then tuned so that
+ * cross links bridge as little of the map as possible (a barycenter heuristic,
+ * as in Sugiyama-style layouts, applied to whole subtrees).
+ */
+function layout(graph: Graph): { placed: Map<string, Placed>; height: number; columns: number } {
+  const byId = new Map(graph.nodes.map((n) => [n.title, n]));
+  const children = new Map<string, string[]>();
+  for (const n of graph.nodes) {
+    if (n.title === graph.center) continue;
+    // A topic whose parent isn't on the map hangs off the center.
+    const parent = n.parent && byId.has(n.parent) ? n.parent : graph.center;
+    if (!children.has(parent)) children.set(parent, []);
+    children.get(parent)!.push(n.title);
+  }
+  const cross = graph.edges.filter((e) => e.kind === 'cross');
+  const partners = new Map<string, string[]>();
+  for (const e of cross) {
+    for (const [a, b] of [
+      [e.source, e.target],
+      [e.target, e.source],
+    ]) {
+      if (!partners.has(a)) partners.set(a, []);
+      partners.get(a)!.push(b);
+    }
+  }
+
+  const y = new Map<string, number>();
+  const assign = () => {
+    let slot = 0;
+    const place = (id: string): number => {
+      const kids = children.get(id) ?? [];
+      if (kids.length === 0) {
+        y.set(id, slot++ * ROW);
+      } else {
+        const ys = kids.map(place);
+        y.set(id, (ys[0] + ys[ys.length - 1]) / 2);
+      }
+      return y.get(id)!;
+    };
+    place(graph.center);
+  };
+
+  const subtree = (id: string, into = new Set<string>()) => {
+    into.add(id);
+    for (const c of children.get(id) ?? []) subtree(c, into);
+    return into;
+  };
+
+  for (let sweep = 0; sweep < SWEEPS; sweep++) {
+    assign();
+    for (const [parent, kids] of children) {
+      if (kids.length < 2) continue;
+      const bary = new Map<string, number>();
+      for (const kid of kids) {
+        const inside = subtree(kid);
+        const outside = [...inside].flatMap((id) => (partners.get(id) ?? []).filter((p) => !inside.has(p)));
+        bary.set(kid, outside.length ? outside.reduce((s, p) => s + (y.get(p) ?? 0), 0) / outside.length : y.get(kid)!);
+      }
+      children.set(parent, [...kids].sort((a, b) => bary.get(a)! - bary.get(b)!));
+    }
+  }
+  assign();
+
+  const placed = new Map<string, Placed>();
+  let maxY = 0;
+  let columns = 0;
+  for (const n of graph.nodes) {
+    const ny = y.get(n.title);
+    if (ny === undefined) continue;
+    placed.set(n.title, { id: n.title, depth: n.depth, x: n.depth * COL, y: ny });
+    maxY = Math.max(maxY, ny);
+    columns = Math.max(columns, n.depth);
+  }
+  return { placed, height: maxY, columns };
 }
 
-/** Radius of each ring in world units; each ring is one step further from the center. */
-const RING = [0, 150, 260, 350, 430, 500];
-/** Dot radius by depth, in screen pixels. */
-const DOT = [9, 6, 4.5, 4, 3.5, 3.5];
-const LABEL_SIZE = [18, 13, 12, 11.5, 11, 11];
-const MIN_K = 0.3;
-const MAX_K = 3;
+/** A tree edge: a horizontal S-curve from parent to child. */
+const treePath = (a: Placed, b: Placed) => {
+  const mid = (a.x + b.x) / 2;
+  return `M${a.x},${a.y} C${mid},${a.y} ${mid},${b.y} ${b.x},${b.y}`;
+};
 
-const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
-const edgeKey = (a: string, b: string) => (a < b ? `${a}\u0000${b}` : `${b}\u0000${a}`);
+/** A cross edge: bows out to the right of both ends, away from the tree lines between columns. */
+const crossPath = (a: Placed, b: Placed) => {
+  const bulge = Math.max(a.x, b.x) + COL * 0.35;
+  return `M${a.x},${a.y} C${bulge},${a.y} ${bulge},${b.y} ${b.x},${b.y}`;
+};
 
 function useSize<T extends HTMLElement>() {
   const ref = useRef<T>(null);
@@ -58,10 +141,6 @@ interface Props {
   onSelect: (title: string) => void;
 }
 
-type Gesture =
-  | { kind: 'pan'; startX: number; startY: number; viewX: number; viewY: number; moved: boolean; node?: string }
-  | { kind: 'node'; id: string; startX: number; startY: number; moved: boolean };
-
 interface View {
   x: number;
   y: number;
@@ -70,18 +149,16 @@ interface View {
   animate: boolean;
 }
 
+type Gesture = { startX: number; startY: number; viewX: number; viewY: number; moved: boolean; node?: string };
+
 /**
- * The topic map: the center article with up to five rings of related topics
- * around it. Drag the map to pan, drag a topic to move it, scroll to zoom.
+ * The topic map: the center article on the left and up to five steps of
+ * related topics expanding to the right. Drag to pan, scroll to zoom.
  */
 export function TopicGraph({ graph, selected, onSelect }: Props) {
   const [box, { width, height }] = useSize<HTMLDivElement>();
   const svgRef = useRef<SVGSVGElement>(null);
   const reduced = useMemo(prefersReducedMotion, []);
-  const simRef = useRef<Simulation<SimNode, SimLink> | null>(null);
-  const nodesRef = useRef(new Map<string, SimNode>());
-  const [links, setLinks] = useState<SimLink[]>([]);
-  const [, setFrame] = useState(0);
   const [view, setView] = useState<View>({ x: 0, y: 0, k: 1, animate: false });
   const viewTouched = useRef(false);
   const gesture = useRef<Gesture | null>(null);
@@ -90,92 +167,31 @@ export function TopicGraph({ graph, selected, onSelect }: Props) {
   const [focused, setFocused] = useState<string | null>(null);
 
   const byTitle = useMemo(() => new Map(graph.nodes.map((n) => [n.title, n])), [graph]);
+  const { placed, height: treeHeight, columns } = useMemo(() => layout(graph), [graph]);
 
-  // One simulation per map; nodes keep their positions as new rings arrive.
-  useEffect(() => {
-    const sim = forceSimulation<SimNode, SimLink>()
-      .force(
-        'link',
-        forceLink<SimNode, SimLink>()
-          .id((d) => d.id)
-          .distance((l) => {
-            const s = l.source as SimNode;
-            const t = l.target as SimNode;
-            return l.kind === 'tree' ? Math.abs(RING[t.depth] - RING[s.depth]) * 1.1 : 140;
-          })
-          .strength((l) => (l.kind === 'tree' ? 0.35 : 0.02)),
-      )
-      .force('charge', forceManyBody<SimNode>().strength((d) => (d.depth <= 1 ? -320 : -110)).distanceMax(420))
-      .force('collide', forceCollide<SimNode>((d) => (d.depth <= 1 ? 34 : d.depth === 2 ? 22 : 14)))
-      .force('radial', forceRadial<SimNode>((d) => RING[d.depth], 0, 0).strength(0.9))
-      .alphaDecay(0.03)
-      .on('tick', () => setFrame((f) => f + 1));
-    sim.stop();
-    simRef.current = sim;
-    return () => {
-      sim.stop();
-    };
-  }, []);
-
-  // Feed new nodes in, each placed on its ring beside the topic it came from.
-  useEffect(() => {
-    const sim = simRef.current;
-    if (!sim) return;
-    const map = nodesRef.current;
-    const firstRing = graph.nodes.filter((n) => n.depth === 1);
-    const siblings = new Map<string, number>();
-
-    for (const n of graph.nodes) {
-      if (map.has(n.title)) continue;
-      let angle = 0;
-      if (n.depth === 1) {
-        angle = -Math.PI / 2 + (firstRing.indexOf(n) / firstRing.length) * Math.PI * 2;
-      } else if (n.parent) {
-        const p = map.get(n.parent);
-        const i = siblings.get(n.parent) ?? 0;
-        siblings.set(n.parent, i + 1);
-        angle = (p ? Math.atan2(p.y, p.x) : 0) + (i - 0.5) * (0.5 / n.depth);
-      }
-      const node: SimNode = {
-        id: n.title,
-        depth: n.depth,
-        x: Math.cos(angle) * RING[n.depth],
-        y: Math.sin(angle) * RING[n.depth],
-      };
-      if (n.depth === 0) {
-        node.fx = 0;
-        node.fy = 0;
-      }
-      map.set(n.title, node);
-    }
-
-    const nextLinks: SimLink[] = graph.edges.map((e) => ({ source: e.source, target: e.target, kind: e.kind }));
-    sim.nodes([...map.values()]);
-    (sim.force('link') as ForceLink<SimNode, SimLink>).links(nextLinks);
-    setLinks(nextLinks);
-
-    if (reduced) {
-      sim.alpha(1);
-      sim.tick(300);
-      setFrame((f) => f + 1);
-    } else {
-      sim.alpha(0.7).restart();
-    }
-  }, [graph, reduced]);
-
-  // Fit the loaded rings into the canvas until the reader takes over the view.
-  const fit = (animate: boolean) => {
+  // The opening view reads like a page: the full height at a readable size,
+  // the center's label in view on the left, further steps a pan to the right.
+  // "Fit map" shows everything.
+  const centerLabel = Math.min(graph.center.length * LABEL_SIZE[0] * 0.55, 220) + DOT[0] + 16;
+  const fit = (whole: boolean, animate: boolean) => {
     if (!width || !height) return;
-    // On phones, frame the inner rings so labels stay readable; the rest is a pan away.
-    const phone = window.matchMedia('(max-width: 639px)').matches;
-    const extent = RING[phone ? Math.min(graph.depth, 2) : graph.depth] + 90;
-    const k = clamp(Math.min(width, height) / (2 * extent), MIN_K, 1.2);
-    setView({ x: width / 2, y: height / 2, k, animate: animate && !reduced });
+    const center = placed.get(graph.center);
+    if (whole) {
+      const k = clamp(
+        Math.min((width - centerLabel - 90) / Math.max(columns * COL, 1), (height - 60) / Math.max(treeHeight + 60, 1)),
+        MIN_K,
+        1.1,
+      );
+      setView({ x: centerLabel, y: (height - treeHeight * k) / 2, k, animate: animate && !reduced });
+      return;
+    }
+    const k = clamp((height - 120) / Math.max(treeHeight + 60, 1), 0.6, 1);
+    setView({ x: centerLabel, y: height / 2 - (center?.y ?? 0) * k, k, animate: animate && !reduced });
   };
   useEffect(() => {
-    if (!viewTouched.current) fit(true);
+    if (!viewTouched.current) fit(false, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [width, height, graph.depth]);
+  }, [width, height, placed]);
 
   const zoomAt = (px: number, py: number, factor: number, animate: boolean) => {
     viewTouched.current = true;
@@ -200,21 +216,11 @@ export function TopicGraph({ graph, selected, onSelect }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const toWorld = (clientX: number, clientY: number) => {
-    const r = svgRef.current!.getBoundingClientRect();
-    return { x: (clientX - r.left - view.x) / view.k, y: (clientY - r.top - view.y) / view.k };
-  };
-
   function onPointerDown(e: PointerEvent<SVGSVGElement>) {
     if (e.button !== 0) return;
-    const id = (e.target as Element).closest('[data-node]')?.getAttribute('data-node') ?? undefined;
+    const node = (e.target as Element).closest('[data-node]')?.getAttribute('data-node') ?? undefined;
     e.currentTarget.setPointerCapture(e.pointerId);
-    const start = { startX: e.clientX, startY: e.clientY, moved: false };
-    // The center stays anchored: dragging it pans the map instead.
-    gesture.current =
-      id && id !== graph.center
-        ? { kind: 'node', id, ...start }
-        : { kind: 'pan', viewX: view.x, viewY: view.y, node: id, ...start };
+    gesture.current = { startX: e.clientX, startY: e.clientY, viewX: view.x, viewY: view.y, moved: false, node };
   }
 
   function onPointerMove(e: PointerEvent<SVGSVGElement>) {
@@ -224,23 +230,9 @@ export function TopicGraph({ graph, selected, onSelect }: Props) {
       if (Math.hypot(e.clientX - g.startX, e.clientY - g.startY) < 4) return;
       g.moved = true;
       setDragging(true);
-      if (g.kind === 'node' && !reduced) simRef.current?.alphaTarget(0.25).restart();
     }
-    if (g.kind === 'pan') {
-      viewTouched.current = true;
-      setView((v) => ({ ...v, x: g.viewX + e.clientX - g.startX, y: g.viewY + e.clientY - g.startY, animate: false }));
-    } else {
-      const node = nodesRef.current.get(g.id);
-      if (!node) return;
-      const p = toWorld(e.clientX, e.clientY);
-      node.fx = p.x;
-      node.fy = p.y;
-      if (reduced) {
-        node.x = p.x;
-        node.y = p.y;
-        setFrame((f) => f + 1);
-      }
-    }
+    viewTouched.current = true;
+    setView((v) => ({ ...v, x: g.viewX + e.clientX - g.startX, y: g.viewY + e.clientY - g.startY, animate: false }));
   }
 
   function onPointerUp() {
@@ -248,12 +240,8 @@ export function TopicGraph({ graph, selected, onSelect }: Props) {
     gesture.current = null;
     if (!g) return;
     setDragging(false);
-    simRef.current?.alphaTarget(0);
-    // A press without movement is a click. Dropped topics stay where they were put.
-    if (!g.moved) {
-      const id = g.kind === 'node' ? g.id : g.node;
-      if (id) onSelect(id);
-    }
+    // A press without movement is a click.
+    if (!g.moved && g.node) onSelect(g.node);
   }
 
   function onNodeKey(e: KeyboardEvent<SVGGElement>, id: string) {
@@ -277,19 +265,23 @@ export function TopicGraph({ graph, selected, onSelect }: Props) {
     return { nodes, edges };
   }, [byTitle, selected]);
 
-  // Keep dots and labels a constant on-screen size; zooming spreads topics apart.
+  // Dots and labels keep a constant on-screen size; zooming spreads topics apart.
   const s = 1 / view.k;
   const labelVisible = (id: string, depth: number) =>
-    depth <= 1 ||
-    route.nodes.has(id) ||
-    id === hovered ||
-    id === focused ||
-    (depth === 2 && view.k >= 0.85) ||
-    view.k >= 1.3;
+    // Zoomed out, columns are too close for every label on the route: the route stays brass, the selected topic keeps its label.
+    depth <= 1 || id === selected || id === hovered || id === focused || view.k >= 0.6;
+  // Cross links are secondary ("also related to"): drawn for the topic in hand only, so they never clutter the map.
+  const inHand = new Set([selected, hovered, focused].filter((t): t is string => Boolean(t) && t !== graph.center));
 
-  const nodes = [...nodesRef.current.values()].sort(
+  const nodes = [...placed.values()].sort(
     (a, b) => Number(route.nodes.has(a.id)) - Number(route.nodes.has(b.id)) || b.depth - a.depth,
   );
+  const edges = graph.edges
+    .map((e) => ({ ...e, a: placed.get(e.source), b: placed.get(e.target) }))
+    .filter((e): e is typeof e & { a: Placed; b: Placed } => Boolean(e.a && e.b))
+    .filter((e) => e.kind === 'tree' || inHand.has(e.source) || inHand.has(e.target))
+    // Cross links first, so tree lines draw over them.
+    .sort((p, q) => Number(p.kind === 'tree') - Number(q.kind === 'tree'));
 
   const groupStyle: CSSProperties = {
     transform: `translate(${view.x}px, ${view.y}px) scale(${view.k})`,
@@ -309,26 +301,31 @@ export function TopicGraph({ graph, selected, onSelect }: Props) {
         onPointerCancel={onPointerUp}
       >
         <g style={groupStyle}>
-          {RING.slice(1, graph.depth + 1).map((r) => (
-            <circle key={r} r={r} className="graph-ring" vectorEffect="non-scaling-stroke" />
+          {/* One faint guide per step outward. */}
+          {Array.from({ length: columns }, (_, i) => (
+            <line
+              key={i}
+              className="graph-ring"
+              vectorEffect="non-scaling-stroke"
+              x1={(i + 1) * COL}
+              x2={(i + 1) * COL}
+              y1={-ROW}
+              y2={treeHeight + ROW}
+            />
           ))}
 
-          {links.map((l) => {
-            const a = l.source as SimNode;
-            const b = l.target as SimNode;
-            if (typeof a !== 'object' || typeof b !== 'object') return null;
-            const onRoute = route.edges.has(edgeKey(a.id, b.id));
+          {edges.map((e) => {
+            const onRoute = e.kind === 'tree' && route.edges.has(edgeKey(e.source, e.target));
+            // Draw left to right regardless of how the edge was found.
+            const [a, b] = e.a.x <= e.b.x ? [e.a, e.b] : [e.b, e.a];
             return (
-              <line
-                key={edgeKey(a.id, b.id)}
-                className={`survey-line graph-edge ${l.kind === 'cross' ? 'graph-edge--cross' : ''} ${
+              <path
+                key={edgeKey(e.source, e.target)}
+                d={e.kind === 'tree' ? treePath(a, b) : crossPath(a, b)}
+                className={`survey-line graph-edge ${e.kind === 'cross' ? 'graph-edge--cross' : ''} ${
                   onRoute ? 'survey-line--active' : ''
                 }`}
                 vectorEffect="non-scaling-stroke"
-                x1={a.x}
-                y1={a.y}
-                x2={b.x}
-                y2={b.y}
               />
             );
           })}
@@ -338,17 +335,7 @@ export function TopicGraph({ graph, selected, onSelect }: Props) {
             const isSelected = n.id === selected;
             const r = DOT[n.depth] * s;
             const size = LABEL_SIZE[n.depth] * s;
-            const len = Math.hypot(n.x, n.y) || 1;
-            const cos = n.x / len;
-            const label: { anchor: 'start' | 'middle' | 'end'; dx: number; dy: number } = isCenter
-              ? { anchor: 'middle', dx: 0, dy: r + size * 1.1 }
-              : cos > 0.3
-                ? { anchor: 'start', dx: r + 6 * s, dy: size * 0.35 }
-                : cos < -0.3
-                  ? { anchor: 'end', dx: -(r + 6 * s), dy: size * 0.35 }
-                  : n.y > 0
-                    ? { anchor: 'middle', dx: 0, dy: r + size * 1.1 }
-                    : { anchor: 'middle', dx: 0, dy: -(r + size * 0.5) };
+            const strong = isSelected || n.id === hovered || n.id === focused;
             return (
               <g
                 key={n.id}
@@ -374,17 +361,16 @@ export function TopicGraph({ graph, selected, onSelect }: Props) {
                   }`}
                 />
                 {labelVisible(n.id, n.depth) && (
+                  // Labels sit above their dot, centered, clear of the lines that leave it sideways.
                   <text
-                    x={label.dx}
-                    y={label.dy}
-                    textAnchor={label.anchor}
+                    x={isCenter ? -(r + 8 * s) : 0}
+                    y={isCenter ? size * 0.35 : -(r + 5 * s)}
+                    textAnchor={isCenter ? 'end' : 'middle'}
                     fontSize={size}
                     strokeWidth={4 * s}
-                    className={`graph-label ${isCenter ? 'graph-label--center' : ''} ${
-                      isSelected || n.id === hovered ? 'graph-label--strong' : ''
-                    }`}
+                    className={`graph-label ${isCenter ? 'graph-label--center' : ''} ${strong ? 'graph-label--strong' : ''}`}
                   >
-                    {n.id}
+                    {isCenter || strong ? n.id : shorten(n.id)}
                   </text>
                 )}
               </g>
@@ -404,8 +390,8 @@ export function TopicGraph({ graph, selected, onSelect }: Props) {
           size="sm"
           variant="secondary"
           onPress={() => {
-            viewTouched.current = false;
-            fit(true);
+            viewTouched.current = true;
+            fit(true, true);
           }}
         >
           Fit map

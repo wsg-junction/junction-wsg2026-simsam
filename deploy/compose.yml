@@ -25,6 +25,8 @@ services:
       DATABASE_URL: mysql://simsam:${DB_PASSWORD}@db:3306/simsam
       # Optional: without it the app answers from Wikipedia text only.
       NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
+      # Optional: web search (context.dev) for context beyond Wikipedia.
+      CONTEXT_DEV_API_KEY: ${CONTEXT_DEV_API_KEY:-}
       # Optional: read compact briefs aloud with ElevenLabs.
       ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
       ELEVENLABS_VOICE_ID: ${ELEVENLABS_VOICE_ID:-}

@@ -71,7 +71,7 @@ async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export async function search(query: string, limit: number, signal?: AbortSignal): Promise<Topic[]> {
+async function liveSearch(query: string, limit: number, signal?: AbortSignal): Promise<Topic[]> {
   const params = new URLSearchParams({
     action: 'query',
     list: 'search',
@@ -90,11 +90,17 @@ export async function search(query: string, limit: number, signal?: AbortSignal)
 
 const relatedCache = new Map<string, Promise<Topic[]>>();
 
-/** Wikipedia's related-article search ("morelike:"), cached per title. */
+/**
+ * Articles related to this one, cached per title: neighbours in the local
+ * corpus's vector index, or Wikipedia's related-article search ("morelike:")
+ * for articles outside it.
+ */
 export function related(title: string, signal?: AbortSignal): Promise<Topic[]> {
   let pending = relatedCache.get(title);
   if (!pending) {
-    pending = search(`morelike:${title}`, 10, signal);
+    pending = localRelated(title, signal).then((local) =>
+      local.length >= 3 ? local : liveSearch(`morelike:${title}`, 10, signal),
+    );
     relatedCache.set(title, pending);
     pending.catch(() => relatedCache.delete(title));
   }
@@ -110,7 +116,7 @@ async function eachLimited<T>(items: T[], limit: number, run: (item: T) => Promi
 }
 
 /** Start from a question, or from an article with optional first-ring topics (e.g. a page's other sources). */
-export type GraphRoot = { question: string } | { title: string; seeds?: Topic[] };
+export type GraphRoot = { question: string } | { title: string; seeds?: Topic[]; about?: string };
 
 /**
  * Map a question (or a known article) out to MAX_DEPTH rings. The first ring
@@ -122,6 +128,20 @@ export async function buildGraph(
   onProgress: (graph: TopicGraph) => void,
   signal?: AbortSignal,
 ): Promise<TopicGraph> {
+  // With the corpus loaded, the whole map comes from MariaDB's vector index in
+  // one request; the live API below is only for servers without it.
+  if ('title' in root) {
+    const fromDb = await postJson<TopicGraph>(
+      '/api/graph',
+      { title: root.title, seeds: (root.seeds ?? []).slice(0, 10).map((s) => s.title), about: root.about?.slice(0, 2000) },
+      signal,
+    );
+    if (fromDb && fromDb.nodes.length > 1) {
+      onProgress(fromDb);
+      return fromDb;
+    }
+  }
+
   let center: Topic;
   let firstRing: Topic[];
   if ('question' in root) {
@@ -192,9 +212,17 @@ export async function buildGraph(
 
 const summaryCache = new Map<string, Summary>();
 
+/** A topic's summary: from MariaDB when the article is stored, from the live API otherwise. */
 export async function getSummary(title: string, signal?: AbortSignal): Promise<Summary> {
   const cached = summaryCache.get(title);
   if (cached) return cached;
+  const stored = (await postJson<{ articles: (CorpusArticle | null)[] }>('/api/articles', { titles: [title] }, signal))
+    ?.articles[0];
+  if (stored) {
+    const summary: Summary = { title: stored.title, extract: stored.extract.split(/\n+/)[0], url: stored.url };
+    summaryCache.set(title, summary);
+    return summary;
+  }
   const data = await getJson<{
     title: string;
     description?: string;
@@ -222,8 +250,8 @@ export interface Article {
   image?: { source: string; width: number; height: number };
 }
 
-/** Lead sections, descriptions and images for several articles in one request, in the order asked. */
-export async function getArticles(titles: string[], signal?: AbortSignal): Promise<Article[]> {
+/** Lead sections, descriptions and images from the live API, in the order asked. */
+async function liveArticles(titles: string[], signal?: AbortSignal): Promise<Article[]> {
   if (titles.length === 0) return [];
   const params = new URLSearchParams({
     action: 'query',
@@ -277,5 +305,123 @@ export async function getArticles(titles: string[], signal?: AbortSignal): Promi
         image: pg.thumbnail,
       },
     ];
+  });
+}
+
+// ---------- The local corpus (MariaDB, served by our API) ----------
+//
+// Articles collected into data/wikipedia-en are loaded into MariaDB with
+// embeddings (see apps/api/src/ingest.ts). Searches and article text come from
+// there first; the live Wikipedia API covers everything outside the corpus.
+
+interface CorpusHit {
+  title: string;
+  snippet: string;
+  distance: number;
+  /** The query names this article by its full title. */
+  titleMatch?: boolean;
+  /** Stored in MariaDB with embeddings. */
+  stored?: boolean;
+}
+
+async function postJson<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T | null> {
+  try {
+    const res = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal,
+    });
+    return res.ok ? ((await res.json()) as T) : null;
+  } catch (err) {
+    if (signal?.aborted) throw err;
+    return null;
+  }
+}
+
+async function localRelated(title: string, signal?: AbortSignal): Promise<Topic[]> {
+  try {
+    const res = await fetch(`/api/related?${new URLSearchParams({ title, limit: '10' })}`, { signal });
+    if (!res.ok) return [];
+    const { results } = (await res.json()) as { results: CorpusHit[] };
+    return results.map((r) => ({ title: r.title, snippet: r.snippet }));
+  } catch (err) {
+    if (signal?.aborted) throw err;
+    return [];
+  }
+}
+
+/**
+ * Search, ranked by vectors in MariaDB: the server runs vector search over the
+ * corpus's embedded passages and ranks Wikipedia's own search results (sent as
+ * candidates, for topics the corpus lacks) by the same embedding distance, with
+ * articles the query names by title boosted. Without the corpus, or if the
+ * server can't rank, Wikipedia's own order is used.
+ */
+export async function search(query: string, limit: number, signal?: AbortSignal): Promise<Topic[]> {
+  const live = await liveSearch(query, limit, signal).catch((err) => {
+    if (signal?.aborted) throw err;
+    return [] as Topic[];
+  });
+  const ranked = await postJson<{ results: CorpusHit[] }>(
+    '/api/search',
+    { query, limit, candidates: live.map((t) => ({ title: t.title, snippet: t.snippet.slice(0, 1000) })) },
+    signal,
+  );
+  const hits = ranked?.results ?? [];
+  return hits.length > 0 ? hits.map((r) => ({ title: r.title, snippet: r.snippet })) : live;
+}
+
+/** Search only the local corpus (e.g. to find an article whose history is stored). */
+export async function searchCorpus(query: string, limit: number, signal?: AbortSignal): Promise<Topic[]> {
+  const local = await postJson<{ results: CorpusHit[] }>('/api/search', { query, limit }, signal);
+  return (local?.results ?? []).map((r) => ({ title: r.title, snippet: r.snippet }));
+}
+
+interface CorpusArticle {
+  title: string;
+  url: string;
+  revisionId: number;
+  extract: string;
+}
+
+/**
+ * Articles for a research page: text from the local corpus where stored, the
+ * live API for the rest, and pictures and short descriptions from the live
+ * API for all of them (the collection has no images). Works without the live
+ * API for stored articles, just without pictures.
+ */
+/** The stored article with exactly this title (ignoring case), if the local collection has one. */
+export async function storedTitle(title: string, signal?: AbortSignal): Promise<string | null> {
+  const res = await postJson<{ articles: (CorpusArticle | null)[] }>('/api/articles', { titles: [title] }, signal);
+  return res?.articles[0]?.title ?? null;
+}
+
+export async function getArticles(titles: string[], signal?: AbortSignal): Promise<Article[]> {
+  if (titles.length === 0) return [];
+  const [local, live] = await Promise.all([
+    postJson<{ articles: (CorpusArticle | null)[] }>('/api/articles', { titles }, signal),
+    liveArticles(titles, signal).catch((err) => {
+      if (signal?.aborted) throw err;
+      return [] as Article[];
+    }),
+  ]);
+  const liveByTitle = new Map(live.map((a) => [a.title.toLowerCase(), a]));
+  const seen = new Set<string>();
+  return titles.flatMap((t, i) => {
+    const stored = local?.articles[i];
+    const fromLive = liveByTitle.get((stored?.title ?? t).toLowerCase()) ?? live.find((a) => a.title === t);
+    const article: Article | undefined = stored
+      ? {
+          title: stored.title,
+          description: fromLive?.description,
+          extract: stored.extract,
+          url: `https://en.wikipedia.org/w/index.php?oldid=${stored.revisionId}`,
+          image: fromLive?.image,
+        }
+      : fromLive;
+    if (!article || seen.has(article.title)) return [];
+    seen.add(article.title);
+    return [article];
   });
 }

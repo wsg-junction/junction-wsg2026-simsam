@@ -1,14 +1,17 @@
 // The API fetches source text itself rather than trusting text sent by the
 // browser, so the AI endpoint only ever reasons over real Wikipedia articles.
+// Articles in the local corpus (MariaDB) come from there; the live API is the
+// fallback for anything outside it.
+import { corpusArticles } from './corpus.js';
 
-const ACTION_API = 'https://en.wikipedia.org/w/api.php';
+export const ACTION_API = 'https://en.wikipedia.org/w/api.php';
 // Wikimedia asks API clients to identify themselves with contact details and
 // throttles generic agents harder. Set WIKIPEDIA_USER_AGENT (the same variable
 // the data scripts use), e.g. "Atlas/1.0 (https://example.com; you@example.com)".
 const USER_AGENT = process.env.WIKIPEDIA_USER_AGENT || 'atlas-explorer/0.1 (wikipedia research canvas)';
 
 /** GET with up to two retries when Wikipedia throttles us (429/503), honouring Retry-After. */
-async function wikiFetch(url: string, signal?: AbortSignal) {
+export async function wikiFetch(url: string, signal?: AbortSignal) {
   for (let attempt = 0; ; attempt++) {
     const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT }, signal });
     if ((res.status !== 429 && res.status !== 503) || attempt >= 2) return res;
@@ -27,8 +30,8 @@ export interface SourceText {
 
 const cache = new Map<string, { at: number; source: SourceText | null }>();
 
-/** Lead sections for the given titles, aligned with the input (null where a page is missing). */
-export async function fetchIntros(titles: string[], signal?: AbortSignal): Promise<(SourceText | null)[]> {
+/** Lead sections from the live API, aligned with the input (null where a page is missing). */
+async function fetchLiveIntros(titles: string[], signal?: AbortSignal): Promise<(SourceText | null)[]> {
   const now = Date.now();
   const missing = titles.filter((t) => {
     const hit = cache.get(t);
@@ -73,4 +76,20 @@ export async function fetchIntros(titles: string[], signal?: AbortSignal): Promi
   }
 
   return titles.map((t) => cache.get(t)?.source ?? null);
+}
+
+/** Lead sections for the given titles, aligned with the input: local corpus first, then live Wikipedia. */
+export async function fetchIntros(titles: string[], signal?: AbortSignal): Promise<(SourceText | null)[]> {
+  const local = await corpusArticles(titles);
+  const missing = titles.filter((_, i) => !local[i]);
+  const live = missing.length ? await fetchLiveIntros(missing, signal) : [];
+  const liveByTitle = new Map(missing.map((t, i) => [t, live[i]]));
+  return titles.map((t, i) => {
+    const article = local[i];
+    if (article) {
+      const text = article.extract.length > MAX_CHARS ? `${article.extract.slice(0, MAX_CHARS)}…` : article.extract;
+      return { title: article.title, text };
+    }
+    return liveByTitle.get(t) ?? null;
+  });
 }

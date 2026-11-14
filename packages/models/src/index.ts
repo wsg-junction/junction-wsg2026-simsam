@@ -5,11 +5,29 @@ export interface Health {
   ai: boolean;
   /** Whether ElevenLabs is configured: reading aloud (POST /api/speech) and spoken questions (POST /api/transcribe). */
   voice: boolean;
+  /** Whether the local Wikipedia corpus (MariaDB, with embeddings) is loaded. */
+  corpus: boolean;
+  /** Whether web search (context.dev) is configured, so the AI can pull in context beyond Wikipedia. */
+  web: boolean;
 }
 
-/** One step of an exploration: a question the user asked, or a topic they dove into from the map. */
+/** A passage from a web page found by web search (context.dev), used as a source next to Wikipedia. */
+export interface WebSource {
+  title: string;
+  url: string;
+  /** The site's domain, e.g. "imf.org". */
+  site: string;
+  /** The passages of the page that match the search. */
+  text: string;
+}
+
+/**
+ * One step of an exploration: a question the user asked, a topic they dove
+ * into from the map, or an article whose edit history they looked at (text is
+ * the article title for dives and histories).
+ */
 export interface ExplorationStep {
-  kind: 'question' | 'dive';
+  kind: 'question' | 'dive' | 'history';
   text: string;
 }
 
@@ -21,11 +39,20 @@ export interface Exploration {
   focusTitle: string;
   steps: ExplorationStep[];
   createdAt: string;
+  /** Whether everything it showed was saved too (GET /api/explorations/:id returns it). */
+  hasSnapshot: boolean;
+}
+
+/** GET /api/explorations/:id: a saved exploration with its snapshot. */
+export interface SavedExploration extends Exploration {
+  /** What the web app saved (its own format, see ExplorationSnapshot there); null for older saves. */
+  snapshot: unknown;
 }
 
 export interface NewExploration {
   focusTitle: string;
   steps: ExplorationStep[];
+  snapshot?: unknown;
 }
 
 /** An earlier question and its answer, so follow-ups can be understood in context. */
@@ -58,6 +85,37 @@ export interface RewriteResponse {
   query: string;
 }
 
+/**
+ * Which sources the AI chose to gather for a question (POST /api/plan, same body
+ * as RewriteRequest). Each is null when it decided that tool isn't needed.
+ */
+export interface SourcePlan {
+  /** A standalone Wikipedia search query. */
+  wikipediaQuery: string | null;
+  /**
+   * A web search query for the context panel (beside the Wikipedia page), when
+   * the question needs more than article intros: impacts, data, analysis, recent news.
+   */
+  webQuery: string | null;
+}
+
+/** POST /api/context: web context for a page, kept apart from its Wikipedia content. */
+export interface ContextRequest {
+  /** What to find context on, e.g. "consequences for the financial sector". */
+  question: string;
+  /** The page's topic (its focus article), added to the search when the question doesn't name it. */
+  topic: string;
+  /** A ready-made web query (from the planner); otherwise one is built from question and topic. */
+  query?: string;
+}
+
+export interface ContextResponse {
+  query: string;
+  sources: WebSource[];
+  /** A short summary of the sources with [n] citations, or null without AI. */
+  summary: string | null;
+}
+
 /** A dated event in a compact brief. `sources` are 1-based excerpt numbers. */
 export interface BriefEvent {
   /** For ordering; negative for BCE. */
@@ -81,4 +139,110 @@ export interface Brief {
   headline: string;
   events: BriefEvent[];
   points: BriefPoint[];
+}
+
+/** One important edit in an article's stored history (from the system-versioned table). */
+export interface ArticleChange {
+  /** 1-based; the history brief cites changes by this number. */
+  n: number;
+  revisionId: number;
+  /** When the edit was made on Wikipedia (ISO 8601). */
+  at: string;
+  editor: string | null;
+  comment: string | null;
+  bytesBefore: number;
+  bytesAfter: number;
+  sectionsAdded: string[];
+  sectionsRemoved: string[];
+  /** How much of the lead was rewritten, 0 (unchanged) to 1 (entirely new). */
+  leadChange: number;
+  /** The article as it was right after this edit. */
+  url: string;
+  /** What this edit changed, on Wikipedia. */
+  diffUrl: string;
+  /** A one-line plain description built from the data above. */
+  summary: string;
+}
+
+/** How much one edit changed one section, in words (moved text doesn't count). */
+export interface SectionChange {
+  /** "Lead" for the text before the first heading. */
+  section: string;
+  added: number;
+  removed: number;
+}
+
+/** A substantial edit in the history panel: real prose changes, not typo fixes, formatting, bots or reverted vandalism. */
+export interface HistoryChange {
+  /** 1-based, in date order; the overview cites changes by this number. */
+  n: number;
+  revisionId: number;
+  parentId: number;
+  at: string;
+  editor: string | null;
+  comment: string | null;
+  bytesBefore: number;
+  bytesAfter: number;
+  wordsAdded: number;
+  wordsRemoved: number;
+  /** Sections this edit changed, most changed first. */
+  sections: SectionChange[];
+  sectionsAdded: string[];
+  sectionsRemoved: string[];
+  /** A few words naming the change, and one sentence on it (by AI when available). */
+  title: string;
+  summary: string;
+  diffUrl: string;
+}
+
+/** POST /api/article-history: an article's substantial changes across its recent history. */
+export interface ArticleTimeline {
+  title: string;
+  pageId: number;
+  url: string;
+  /** Revisions scanned (metadata of up to a few thousand recent edits). */
+  scanned: number;
+  from: string;
+  to: string;
+  /** Article size over the scanned period, thinned to a few hundred points. */
+  sizes: { at: string; bytes: number }[];
+  changes: HistoryChange[];
+  /** The most impactful changes in a few sentences, citing changes as [n]; null without AI. */
+  overview: string | null;
+}
+
+/** A run of diff text: unchanged context, or words added or removed. */
+export interface DiffSegment {
+  type: 'same' | 'added' | 'removed';
+  text: string;
+}
+
+export interface DiffHunk {
+  section: string;
+  segments: DiffSegment[];
+}
+
+/** GET /api/article-history/diff: what one edit added and removed, from the stored versions. */
+export interface RevisionDiff {
+  revisionId: number;
+  parentId: number;
+  hunks: DiffHunk[];
+  /** More changed than is shown. */
+  truncated: boolean;
+}
+
+/** How an article changed across its stored versions, with the most important edits picked out. */
+export interface ArticleHistory {
+  title: string;
+  pageId: number;
+  url: string;
+  /** Number of stored versions (the collection keeps the most recent revisions, not all of them). */
+  versions: number;
+  from: string;
+  to: string;
+  /** Article size after every stored version, oldest first. */
+  sizes: { at: string; bytes: number; revisionId: number }[];
+  changes: ArticleChange[];
+  brief: Brief;
+  byAi: boolean;
 }

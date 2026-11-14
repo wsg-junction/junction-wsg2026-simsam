@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 import type { ChatCompletionCreateParams, ChatCompletionMessageParam } from 'openai/resources/chat/completions';
-import type { AnswerEvent, Brief, BriefEvent, BriefPoint, PriorTurn } from '@simsam/models';
+import type { AnswerEvent, Brief, BriefEvent, BriefPoint, PriorTurn, SourcePlan, WebSource } from '@simsam/models';
+import { webSearchEnabled } from './context.js';
 import { fetchIntros } from './wikipedia.js';
 
 // NVIDIA's hosted models speak the OpenAI chat completions API.
@@ -73,6 +74,87 @@ export async function rewriteQuery(question: string, history: PriorTurn[], signa
   });
   const query = completion.choices[0]?.message?.content?.trim().replace(/^["']|["'.?]$/g, '') ?? '';
   return query.split('\n')[0].slice(0, 200);
+}
+
+const PLAN_SYSTEM = `You are the research planner of Atlas, a Wikipedia research canvas. You never answer questions: you decide which sources to gather for the latest question by calling tools. The page itself is built from Wikipedia only; web results go to a separate context panel beside it.
+
+- Always call search_wikipedia, with an English Wikipedia search query of 2 to 8 words naming the topic of the latest question. Resolve pronouns and references ("he", "that war", "after that") from the earlier questions. For a follow-up, name the specific aspect it asks about together with the earlier topic (e.g. "economic history of World War II", not just "World War II"), so it finds articles the earlier pages didn't already show.
+- Also call search_web, to fill the context panel, when the question needs more than the intro of an encyclopedia article: specific impacts or consequences in one field (finance, economy, health, culture and so on), figures and statistics, analysis or comparisons, or anything recent. Write a specific web query that names the topic, e.g. "World War II impact on banking and financial markets".
+- Don't call search_web for overviews, definitions, or who, what, where or when questions: "What happened in World War II?", "Who was Churchill?" and "When did it end?" need Wikipedia only.`;
+
+const SEARCH_WIKIPEDIA_TOOL = {
+  type: 'function' as const,
+  function: {
+    name: 'search_wikipedia',
+    description:
+      'Find English Wikipedia articles about a person, place, event, idea or field. Their intros become the main sources of the answer.',
+    parameters: {
+      type: 'object',
+      properties: { query: { type: 'string', description: 'A Wikipedia search query of 2 to 8 words' } },
+      required: ['query'],
+    },
+  },
+};
+
+const SEARCH_WEB_TOOL = {
+  type: 'function' as const,
+  function: {
+    name: 'search_web',
+    description:
+      'Search the web for the context panel, beside the Wikipedia page: impacts and consequences in a specific field, economic or financial effects, statistics, analysis, recent developments.',
+    parameters: {
+      type: 'object',
+      properties: { query: { type: 'string', description: 'A specific web search query naming the topic' } },
+      required: ['query'],
+    },
+  },
+};
+
+const cleanQuery = (q: unknown) =>
+  typeof q === 'string' ? q.trim().replace(/^["']|["'.?]$/g, '').split('\n')[0].slice(0, 200) || null : null;
+
+/**
+ * Let the model pick its sources with tool calls: a Wikipedia search, plus a web
+ * search when the question needs more (offered only when web search is configured).
+ */
+export async function planSources(question: string, history: PriorTurn[], signal?: AbortSignal): Promise<SourcePlan> {
+  if (!client) throw new Error('AI is not configured');
+  const params: NvidiaParams<ChatCompletionCreateParams> = {
+    model: MODEL,
+    // As in the rewrite, earlier answers stay out: shown them, the model starts answering.
+    messages: [
+      { role: 'system', content: PLAN_SYSTEM },
+      {
+        role: 'user',
+        content: [
+          ...(history.length ? ['Earlier questions:', ...history.slice(-4).map((t) => `- ${t.question}`), ''] : []),
+          `Question: ${question}`,
+        ].join('\n'),
+      },
+    ],
+    tools: webSearchEnabled ? [SEARCH_WIKIPEDIA_TOOL, SEARCH_WEB_TOOL] : [SEARCH_WIKIPEDIA_TOOL],
+    tool_choice: 'auto',
+    temperature: 0.1,
+    max_tokens: 300,
+    stream: false,
+    chat_template_kwargs: { enable_thinking: false },
+  };
+  const completion = await client.chat.completions.create(params as ChatCompletionCreateParams & { stream: false }, {
+    signal,
+  });
+  const plan: SourcePlan = { wikipediaQuery: null, webQuery: null };
+  for (const call of completion.choices[0]?.message?.tool_calls ?? []) {
+    if (call.type !== 'function') continue;
+    let args: { query?: unknown } = {};
+    try {
+      args = JSON.parse(call.function.arguments || '{}');
+    } catch {
+      continue;
+    }
+    if (call.function.name === 'search_wikipedia') plan.wikipediaQuery ??= cleanQuery(args.query);
+    if (call.function.name === 'search_web' && webSearchEnabled) plan.webQuery ??= cleanQuery(args.query);
+  }
+  return plan;
 }
 
 /**
@@ -189,27 +271,32 @@ function sanitizeBrief(raw: unknown, sourceCount: number): Brief {
 
 /** A compact brief for a question: a headline plus a sourced timeline or key points. */
 export async function createBrief(question: string, titles: string[], history: PriorTurn[], signal?: AbortSignal) {
-  if (!client) throw new Error('AI is not configured');
   const excerpts = await numberedExcerpts(titles, signal);
   if (!excerpts) throw new Error('No sources could be read');
+  const user = [
+    ...(history.length ? ['Earlier questions:', ...history.slice(-4).map((t) => `- ${t.question}`), ''] : []),
+    'Wikipedia excerpts:',
+    '',
+    excerpts,
+    '',
+    `Question: ${question}`,
+    '',
+    'JSON:',
+  ].join('\n');
+  return completeBrief(BRIEF_SYSTEM, user, titles.length, signal);
+}
 
+/**
+ * Ask the model for a brief (JSON, see BRIEF_SYSTEM) and check its shape.
+ * `sourceCount` bounds the source numbers the brief may cite.
+ */
+export async function completeBrief(system: string, user: string, sourceCount: number, signal?: AbortSignal) {
+  if (!client) throw new Error('AI is not configured');
   const params: NvidiaParams<ChatCompletionCreateParams> = {
     model: MODEL,
     messages: [
-      { role: 'system', content: BRIEF_SYSTEM },
-      {
-        role: 'user',
-        content: [
-          ...(history.length ? ['Earlier questions:', ...history.slice(-4).map((t) => `- ${t.question}`), ''] : []),
-          'Wikipedia excerpts:',
-          '',
-          excerpts,
-          '',
-          `Question: ${question}`,
-          '',
-          'JSON:',
-        ].join('\n'),
-      },
+      { role: 'system', content: system },
+      { role: 'user', content: user },
     ],
     temperature: 0.3,
     max_tokens: 2048,
@@ -233,5 +320,113 @@ export async function createBrief(question: string, titles: string[], history: P
   } catch {
     throw new Error(`Brief wasn't valid JSON: ${json.slice(0, 1500)}`);
   }
-  return sanitizeBrief(parsed, titles.length);
+  return sanitizeBrief(parsed, sourceCount);
+}
+
+// ---------- Context panel (web) ----------
+
+const CONTEXT_SYSTEM = `You write the context panel of Atlas, a Wikipedia research canvas. Beside a Wikipedia page, it adds what web sources say about one angle of the topic.
+
+Rules:
+- Use only the numbered web excerpts. Cite every factual sentence with its excerpt number(s) in square brackets, like [1] or [2][3].
+- Write 2 or 3 sentences, at most 80 words, of plain prose. No markdown.
+- Lead with what the excerpts add on the question's angle (figures, consequences, analysis). If they don't address it, say so in one sentence.
+- Leave out claims that read like opinion, marketing or speculation.`;
+
+/** A short, cited summary of web passages for the context panel. */
+export async function summarizeContext(question: string, topic: string, web: WebSource[], signal?: AbortSignal) {
+  if (!client) throw new Error('AI is not configured');
+  const excerpts = web.map((w, i) => `[${i + 1}] ${w.title} (${w.site})\n${w.text}`).join('\n\n');
+  const params: NvidiaParams<ChatCompletionCreateParams> = {
+    model: MODEL,
+    messages: [
+      { role: 'system', content: CONTEXT_SYSTEM },
+      { role: 'user', content: `Topic of the page: ${topic}\nQuestion: ${question}\n\nWeb excerpts:\n\n${excerpts}` },
+    ],
+    temperature: 0.3,
+    max_tokens: 400,
+    stream: false,
+    chat_template_kwargs: { enable_thinking: false },
+  };
+  const completion = await client.chat.completions.create(params as ChatCompletionCreateParams & { stream: false }, {
+    signal,
+  });
+  const text = completion.choices[0]?.message?.content?.trim() ?? '';
+  // Drop citations to excerpts that don't exist.
+  return text.replace(/\[(\d+)\]/g, (m, n: string) => (Number(n) >= 1 && Number(n) <= web.length ? m : '')) || null;
+}
+
+// ---------- History panel ----------
+
+const TIMELINE_SYSTEM = `You explain how a Wikipedia article changed, for a history panel beside it. You get its substantial edits, numbered, with the sections they touched and samples of the text added and removed. Reply with JSON only, no prose around it, matching:
+
+{
+  "overview": string,
+  "changes": [{ "n": number, "title": string, "summary": string }]
+}
+
+Rules:
+- overview: 2 to 4 sentences, at most 90 words, on the most impactful changes: what content was added, removed or rewritten, and how the article's coverage shifted. Cite edits like [3] or [2][5]. Plain text.
+- changes: one entry per edit, same n. title: at most 7 words naming what changed (e.g. "Added section on postwar reparations", "Lead rewritten around independence"). summary: one sentence, at most 28 words, on what the edit changed in content, using the samples. No citation marks in title or summary.
+- Describe content, not mechanics: never "bytes", never "the editor made changes". Use only the data given.`;
+
+export interface TimelineInput {
+  n: number;
+  at: string;
+  editor: string | null;
+  comment: string | null;
+  sections: { section: string; added: number; removed: number }[];
+  sectionsAdded: string[];
+  sectionsRemoved: string[];
+  addedSample: string;
+  removedSample: string;
+}
+
+/** The history panel's overview and a title and summary per change. */
+export async function describeTimeline(title: string, from: string, to: string, changes: TimelineInput[], signal?: AbortSignal) {
+  if (!client) throw new Error('AI is not configured');
+  const lines = [`Article: ${title}`, `Period: ${from.slice(0, 10)} to ${to.slice(0, 10)}`, '', 'Substantial edits:'];
+  for (const c of changes) {
+    lines.push(
+      `[${c.n}] ${c.at.slice(0, 10)} by ${c.editor ?? 'unknown'}${c.comment ? `, summary: "${c.comment.slice(0, 160)}"` : ''}`,
+      `    Sections: ${c.sections.slice(0, 4).map((s) => `${s.section} (+${s.added}/−${s.removed} words)`).join(', ')}`,
+    );
+    if (c.sectionsAdded.length) lines.push(`    New sections: ${c.sectionsAdded.join(', ')}`);
+    if (c.sectionsRemoved.length) lines.push(`    Removed sections: ${c.sectionsRemoved.join(', ')}`);
+    if (c.addedSample) lines.push(`    Added text: ${c.addedSample}`);
+    if (c.removedSample) lines.push(`    Removed text: ${c.removedSample}`);
+  }
+  lines.push('', 'JSON:');
+  const params: NvidiaParams<ChatCompletionCreateParams> = {
+    model: MODEL,
+    messages: [
+      { role: 'system', content: TIMELINE_SYSTEM },
+      { role: 'user', content: lines.join('\n') },
+    ],
+    temperature: 0.3,
+    max_tokens: 2048,
+    stream: false,
+    chat_template_kwargs: { enable_thinking: false },
+  };
+  const completion = await client.chat.completions.create(params as ChatCompletionCreateParams & { stream: false }, {
+    signal,
+  });
+  const content = completion.choices[0]?.message?.content ?? '';
+  const parsed = JSON.parse(content.slice(content.indexOf('{'), content.lastIndexOf('}') + 1)) as {
+    overview?: unknown;
+    changes?: { n?: unknown; title?: unknown; summary?: unknown }[];
+  };
+  const valid = new Set(changes.map((c) => c.n));
+  const overview =
+    typeof parsed.overview === 'string'
+      ? parsed.overview.trim().replace(/\[(\d+)\]/g, (m, n: string) => (valid.has(Number(n)) ? m : ''))
+      : null;
+  const byN = new Map<number, { title: string; summary: string }>();
+  for (const c of Array.isArray(parsed.changes) ? parsed.changes : []) {
+    const n = Number(c.n);
+    if (valid.has(n) && typeof c.title === 'string' && typeof c.summary === 'string') {
+      byN.set(n, { title: clipWords(c.title.replace(/\s*\[\d+\]/g, ''), 9), summary: clipWords(c.summary.replace(/\s*\[\d+\]/g, ''), 34) });
+    }
+  }
+  return { overview: overview || null, byN };
 }

@@ -41,6 +41,14 @@
   --chart-line: #9fb0c1;
   --chart-node: #6f8396;
   --chart-label: #6a7b8d;
+
+  /* Article history: text added and removed (also told apart by mark shape and strikethrough). */
+  --added: #2f7d4f;
+  --added-bg: #e1f1e6;
+  --added-fg: #1c4f31;
+  --removed: #b4473f;
+  --removed-bg: #f8e1df;
+  --removed-fg: #7a2620;
 }
 
 .dark,
@@ -70,6 +78,13 @@
   --chart-line: #2f4561;
   --chart-node: #4d6583;
   --chart-label: #5f7590;
+
+  --added: #5cc489;
+  --added-bg: #183a2a;
+  --added-fg: #b5ecc8;
+  --removed: #ef8a80;
+  --removed-bg: #47212a;
+  --removed-fg: #f6c1bb;
 }
 
 html,
@@ -138,7 +153,7 @@ body {
 
 /* ---------- Topic map ---------- */
 
-/* One ring per step away from the center. */
+/* One guide per step away from the center. */
 .graph-ring {
   fill: none;
   stroke: var(--chart-line);

@@ -1,4 +1,4 @@
-import type { Exploration, NewExploration } from '@simsam/models';
+import type { Exploration, NewExploration, SavedExploration } from '@simsam/models';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, init);
@@ -7,6 +7,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const listExplorations = () => request<Exploration[]>('/api/explorations');
+
+/** One saved exploration with everything it showed. */
+export const getExploration = (id: number) => request<SavedExploration>(`/api/explorations/${id}`);
 
 export const saveExploration = (body: NewExploration) =>
   request<Exploration>('/api/explorations', {

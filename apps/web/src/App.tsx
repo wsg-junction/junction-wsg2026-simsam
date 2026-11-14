@@ -5,7 +5,8 @@ import { AtlasBackdrop } from './components/AtlasBackdrop';
 import { ExplorationView } from './components/ExplorationView';
 import { Opening } from './components/Opening';
 import { Brand, SavedList, Sidebar, type SavedState } from './components/Sidebar';
-import { deleteExploration, listExplorations, saveExploration, updateExploration } from './lib/api';
+import { deleteExploration, getExploration, listExplorations, saveExploration, updateExploration } from './lib/api';
+import { isSnapshot, type ExplorationSnapshot } from './lib/snapshot';
 import { withViewTransition } from './lib/motion';
 import { ThemeToggle } from './theme';
 
@@ -15,9 +16,10 @@ type View =
       kind: 'exploring';
       key: number;
       steps: ExplorationStep[];
-      /** Set once saved; savedSteps is how many steps that saved copy holds. */
+      /** A saved exploration as it was, restored without regenerating anything. */
+      snapshot?: ExplorationSnapshot;
+      /** Set once saved. */
       savedId?: number;
-      savedSteps?: number;
     };
 
 let viewKey = 0;
@@ -41,25 +43,32 @@ export function App() {
   const explore = (question: string) =>
     go({ kind: 'exploring', key: ++viewKey, steps: [{ kind: 'question', text: question }] });
 
-  const open = (item: Exploration) =>
-    go({ kind: 'exploring', key: ++viewKey, steps: item.steps, savedId: item.id, savedSteps: item.steps.length });
+  // Saves with a snapshot open as they were; older ones (steps only) run their steps again.
+  const open = async (item: Exploration) => {
+    let snapshot: ExplorationSnapshot | undefined;
+    if (item.hasSnapshot) {
+      const full = await getExploration(item.id).catch(() => null);
+      if (full && isSnapshot(full.snapshot)) snapshot = full.snapshot;
+    }
+    go({ kind: 'exploring', key: ++viewKey, steps: item.steps, snapshot, savedId: item.id });
+  };
 
-  async function save(steps: ExplorationStep[], focusTitle: string) {
+  async function save(steps: ExplorationStep[], focusTitle: string, snapshot: ExplorationSnapshot) {
     if (view.kind !== 'exploring') return;
-    const body = { steps, focusTitle };
+    const body = { steps, focusTitle, snapshot };
     const item = view.savedId ? await updateExploration(view.savedId, body) : await saveExploration(body);
     setSaved((s) => ({
       status: 'ready',
       items: [item, ...(s.status === 'ready' ? s.items.filter((i) => i.id !== item.id) : [])],
     }));
-    setView({ ...view, savedId: item.id, savedSteps: steps.length });
+    setView({ ...view, savedId: item.id });
   }
 
   async function remove(item: Exploration) {
     await deleteExploration(item.id);
     setSaved((s) => (s.status === 'ready' ? { ...s, items: s.items.filter((i) => i.id !== item.id) } : s));
     if (view.kind === 'exploring' && view.savedId === item.id)
-      setView({ ...view, savedId: undefined, savedSteps: undefined });
+      setView({ ...view, savedId: undefined });
   }
 
   const activeId = view.kind === 'exploring' ? view.savedId : undefined;
@@ -105,7 +114,8 @@ export function App() {
             <ExplorationView
               key={view.key}
               initialSteps={view.steps}
-              savedSteps={view.savedSteps}
+              snapshot={view.snapshot}
+              saved={view.savedId !== undefined}
               onSave={save}
             />
           )}

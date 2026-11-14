@@ -1,4 +1,14 @@
-import { createContext, createElement, useContext, useEffect, useRef, useState, type MutableRefObject, type ReactNode } from 'react';
+import {
+  createContext,
+  createElement,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type MutableRefObject,
+  type ReactNode,
+} from 'react';
 import { interruptPlayback, resumePlayback } from './playback';
 import { isSpeaking, playbackLevel, sharedAudioContext } from './voice';
 
@@ -23,12 +33,57 @@ import { isSpeaking, playbackLevel, sharedAudioContext } from './voice';
 const FRAME_MS = 20;
 const OUT_RATE = 16_000;
 const PREROLL_FRAMES = 25; // 500 ms kept from before speech was detected
-const ONSET_QUIET = 4; // 80 ms of speech to start an utterance while we're quiet
-const ONSET_SPEAKING = 15; // 300 ms to interrupt us while we're reading aloud
+const ONSET_QUIET = 8; // 160 ms of voice (within 320 ms) to start an utterance while we're quiet
+const ONSET_SPEAKING = 15; // 300 ms of voice (within 600 ms) to interrupt us while we're reading aloud
 const HANGOVER = 45; // 900 ms of silence ends an utterance
 const MIN_SPEECH = 20; // utterances with less than 400 ms of speech are ignored
 const MAX_UTTERANCE = 1500; // 30 s
 const MIN_RMS = 0.012;
+/** Share of a frame's energy that must sit in the speech band for it to count as voice. */
+const MIN_VOICE_SHARE = 0.7;
+/** Once someone is talking, their trailing syllables may fall this far below the threshold. */
+const TRAIL_DB = 8;
+
+const toDb = (rms: number) => 20 * Math.log10(Math.max(rms, 1e-5));
+
+// ---------- The reader's threshold: only voices louder than this count ----------
+
+export const THRESHOLD_RANGE = { min: -60, max: -15 } as const; // dBFS
+const THRESHOLD_KEY = 'atlas-voice-threshold';
+const thresholdListeners = new Set<() => void>();
+
+function readThreshold() {
+  try {
+    const stored = Number(localStorage.getItem(THRESHOLD_KEY));
+    if (stored >= THRESHOLD_RANGE.min && stored <= THRESHOLD_RANGE.max) return stored;
+  } catch {
+    /* fall through to the default */
+  }
+  return -38;
+}
+
+let thresholdDb = readThreshold();
+
+export function setVoiceThreshold(db: number) {
+  thresholdDb = Math.round(Math.min(THRESHOLD_RANGE.max, Math.max(THRESHOLD_RANGE.min, db)));
+  try {
+    localStorage.setItem(THRESHOLD_KEY, String(thresholdDb));
+  } catch {
+    /* the setting just won't persist */
+  }
+  thresholdListeners.forEach((l) => l());
+}
+
+/** The current voice threshold in dBFS, kept in sync across the app. */
+export function useVoiceThreshold() {
+  return useSyncExternalStore(
+    (l) => {
+      thresholdListeners.add(l);
+      return () => thresholdListeners.delete(l);
+    },
+    () => thresholdDb,
+  );
+}
 
 // Collects 20 ms frames on the audio thread and posts them to the page.
 const WORKLET = `
@@ -122,6 +177,8 @@ class HandsFreeListener {
   private node: AudioWorkletNode | null = null;
   private source: MediaStreamAudioSourceNode | null = null;
   private sink: GainNode | null = null;
+  private analyser: AnalyserNode | null = null;
+  private spectrum: Float32Array<ArrayBuffer> | null = null;
 
   private noise = MIN_RMS / 2;
   private echoRatio = 0.3;
@@ -130,6 +187,10 @@ class HandsFreeListener {
   private silence = 0;
   private speechFrames = 0;
   private interrupted = false;
+  /** Frames in a row with nothing voice-like. */
+  private quietRun = 0;
+  /** Whether each recent frame was voice, for the onset window. */
+  private recent: boolean[] = [];
   private preroll: Float32Array[] = [];
   private utterance: Float32Array[] = [];
 
@@ -140,7 +201,9 @@ class HandsFreeListener {
     const ctx = sharedAudioContext();
     await ctx.resume();
     this.stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
+      // No automatic gain: it turns background noise up whenever the room is
+      // quiet, which would make any fixed threshold meaningless.
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false, channelCount: 1 },
     });
     workletLoaded ??= ctx.audioWorklet.addModule(
       URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' })),
@@ -152,11 +215,43 @@ class HandsFreeListener {
     this.sink = ctx.createGain();
     this.sink.gain.value = 0;
     this.source.connect(this.node).connect(this.sink).connect(ctx.destination);
+    // A spectrum of the microphone, to tell voice from hum and hiss.
+    this.analyser = ctx.createAnalyser();
+    this.analyser.fftSize = 1024;
+    this.analyser.smoothingTimeConstant = 0;
+    this.spectrum = new Float32Array(this.analyser.frequencyBinCount);
+    this.source.connect(this.analyser);
     this.node.port.onmessage = (e: MessageEvent<Float32Array>) => this.frame(e.data, ctx.sampleRate);
     this.events.onPhase('listening');
   }
 
+  /** The background level the listener has learned, in dBFS. */
+  get noiseDb() {
+    return toDb(this.noise);
+  }
+
+  /**
+   * Share of the current energy in the speech band (100 Hz to 4 kHz). Voices
+   * sit almost entirely inside it; mains hum, rumble and hiss mostly don't.
+   */
+  private voiceShare(rate: number) {
+    if (!this.analyser || !this.spectrum) return 1;
+    this.analyser.getFloatFrequencyData(this.spectrum);
+    const binHz = rate / this.analyser.fftSize;
+    let voice = 0;
+    let total = 0;
+    for (let i = 1; i < this.spectrum.length; i++) {
+      const hz = i * binHz;
+      if (hz < 20 || hz > 8000) continue;
+      const power = 10 ** (this.spectrum[i] / 10);
+      total += power;
+      if (hz >= 100 && hz <= 4000) voice += power;
+    }
+    return total > 0 ? voice / total : 0;
+  }
+
   stop() {
+    this.analyser?.disconnect();
     this.node?.port.close();
     this.source?.disconnect();
     this.node?.disconnect();
@@ -183,21 +278,39 @@ class HandsFreeListener {
       this.preroll.push(pcm);
       if (this.preroll.length > PREROLL_FRAMES) this.preroll.shift();
 
-      if (level > threshold) {
-        this.above++;
+      // A frame counts as someone talking only if it's louder than the reader's
+      // threshold, clearly above the room (and our own echo), and voice-like.
+      const isVoice = level > threshold && toDb(level) >= thresholdDb && this.voiceShare(rate) >= MIN_VOICE_SHARE;
+
+      // Speech dips between syllables, so look at a window rather than a strict
+      // run: speech has started once voice fills half of it. Clicks and knocks
+      // are far too short to fill it.
+      this.recent.push(isVoice);
+      if (this.recent.length > ONSET_SPEAKING * 2) this.recent.shift();
+      const onset = speaking ? ONSET_SPEAKING : ONSET_QUIET;
+      this.above = this.recent.slice(-onset * 2).filter(Boolean).length;
+
+      if (isVoice) {
+        this.quietRun = 0;
       } else {
-        this.above = Math.max(0, this.above - 1);
-        if (speaking && own) {
-          // Learn how much of our own voice leaks into the mic: jump up to any
-          // louder leak at once, forget it over about a second. The 2.2x margin
-          // and the longer onset cover the peaks in between.
-          this.echoRatio = Math.max(this.echoRatio * 0.99, Math.min(level / Math.max(own, 1e-4), 1.5));
-        } else if (!speaking) {
-          this.noise = this.noise * 0.97 + level * 0.03;
+        this.quietRun++;
+        // Learn the room and our echo only from stretches with nothing voice-like
+        // for 200 ms: the gaps between someone's syllables must not count, or a
+        // person starting to talk would raise the bar against themselves.
+        if (this.quietRun >= 10) {
+          if (speaking && own) {
+            // How much of our own voice leaks into the mic: rise gradually
+            // towards louder leaks, relax within about half a second when less leaks.
+            const leak = Math.min(level / Math.max(own, 1e-4), 1.5);
+            this.echoRatio =
+              leak > this.echoRatio ? this.echoRatio + (leak - this.echoRatio) * 0.05 : Math.max(leak, this.echoRatio * 0.97);
+          } else if (!speaking) {
+            this.noise = this.noise * 0.97 + level * 0.03;
+          }
         }
       }
 
-      if (this.above >= (speaking ? ONSET_SPEAKING : ONSET_QUIET)) {
+      if (this.above >= onset) {
         this.state = 'speech';
         // Barge-in: stop reading the moment someone talks over us.
         this.interrupted = interruptPlayback();
@@ -205,6 +318,7 @@ class HandsFreeListener {
         this.speechFrames = this.above;
         this.silence = 0;
         this.above = 0;
+        this.recent = [];
         this.preroll = [];
         this.events.onPhase('hearing');
       }
@@ -212,7 +326,8 @@ class HandsFreeListener {
     }
 
     this.utterance.push(pcm);
-    if (level > threshold) {
+    // While someone is talking, softer trailing syllables still count.
+    if (level > threshold && toDb(level) >= thresholdDb - TRAIL_DB) {
       this.speechFrames++;
       this.silence = 0;
     } else {
@@ -320,6 +435,12 @@ export function useHandsFree(onAsk: (text: string) => void) {
     }
   }
 
+  /** Put the threshold a comfortable margin above the room's background level. */
+  function calibrate() {
+    const noise = listener.current?.noiseDb;
+    if (noise !== undefined) setVoiceThreshold(noise + 14);
+  }
+
   function disable() {
     listener.current?.stop();
     listener.current = null;
@@ -331,6 +452,7 @@ export function useHandsFree(onAsk: (text: string) => void) {
     on: state.status !== 'off' && state.status !== 'error',
     toggle: () => (listener.current ? disable() : void enable()),
     dismiss: () => setState({ status: 'off' }),
+    calibrate,
     /** Subscribe to the microphone level (for a meter that updates without re-rendering). */
     subscribeLevel: (fn: (level: number) => void) => {
       meters.current.add(fn);

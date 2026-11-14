@@ -22,6 +22,7 @@ interface Props {
   active: number;
   onActiveChange: (index: number) => void;
   onDive: (title: string) => void;
+  onHistory?: (title: string) => void;
   empty?: ReactNode;
 }
 
@@ -31,7 +32,7 @@ interface Props {
  * between pages.
  */
 export const ResearchCanvas = forwardRef<ResearchCanvasHandle, Props>(function ResearchCanvas(
-  { pages, mode, briefs, answers, onRetryAnswer, pending, active, onActiveChange, onDive, empty },
+  { pages, mode, briefs, answers, onRetryAnswer, onHistory, pending, active, onActiveChange, onDive, empty },
   ref,
 ) {
   const scroller = useRef<HTMLDivElement>(null);
@@ -83,7 +84,8 @@ export const ResearchCanvas = forwardRef<ResearchCanvasHandle, Props>(function R
     <div className="relative h-full">
       <div ref={scroller} className="relative h-full snap-y snap-mandatory overflow-y-auto">
         {pages.map((page, i) =>
-          mode === 'compact' ? (
+          // History pages are a timeline in either mode.
+          mode === 'compact' || page.history ? (
             <CompactPageView
               key={page.id}
               page={page}
@@ -91,6 +93,7 @@ export const ResearchCanvas = forwardRef<ResearchCanvasHandle, Props>(function R
               total={total}
               brief={briefs[page.id]}
               isActive={i === active}
+              onHistory={onHistory}
             />
           ) : (
           <ResearchPageView
@@ -101,6 +104,7 @@ export const ResearchCanvas = forwardRef<ResearchCanvasHandle, Props>(function R
             answer={answers[page.id]}
             onDive={onDive}
             onRetryAnswer={() => onRetryAnswer(i)}
+            onHistory={onHistory}
           />
           ),
         )}

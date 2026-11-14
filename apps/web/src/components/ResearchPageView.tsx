@@ -10,15 +10,18 @@ interface Props {
   answer?: PageAnswer;
   onDive: (title: string) => void;
   onRetryAnswer: () => void;
+  /** Show how an article changed over time (only when its history is stored). */
+  onHistory?: (title: string) => void;
 }
 
 const KIND_LABEL = {
   question: 'Follow-up question',
   dive: 'Dove into a topic',
+  history: 'Article history',
 } as const;
 
 /** One page of the research canvas: everything gathered for a single question or dive. */
-export function ResearchPageView({ page, index, total, answer, onDive, onRetryAnswer }: Props) {
+export function ResearchPageView({ page, index, total, answer, onDive, onRetryAnswer, onHistory }: Props) {
   const [lead, ...more] = page.sources;
   const href = (n: number) => `#${page.id}-source-${n}`;
   const paragraphs = lead.extract.split(/\n+/).filter(Boolean).slice(0, 2);
@@ -57,6 +60,13 @@ export function ResearchPageView({ page, index, total, answer, onDive, onRetryAn
             </h3>
             {lead.description && <p className="mt-1 text-sm text-muted first-letter:uppercase">{lead.description}</p>}
           </div>
+          {onHistory && (
+            <div>
+              <Button size="sm" variant="secondary" onPress={() => onHistory(lead.title)}>
+                See how this article changed
+              </Button>
+            </div>
+          )}
           {paragraphs.map((p, i) => (
             <p key={i} className="font-serif text-[1.125rem] leading-[1.7]">
               {p}
@@ -123,7 +133,7 @@ export function ResearchPageView({ page, index, total, answer, onDive, onRetryAn
           </h3>
           <ol className="flex flex-col gap-1.5 text-sm">
             {page.sources.map((article, i) => (
-              <li key={article.title} id={`${page.id}-source-${i + 1}`} className="flex scroll-mt-28 gap-2">
+              <li key={article.url} id={`${page.id}-source-${i + 1}`} className="flex scroll-mt-28 gap-2">
                 <span className="w-5 shrink-0 text-right tabular-nums text-muted">{i + 1}.</span>
                 <Link
                   href={article.url}
@@ -228,7 +238,7 @@ export function PageHeader({ page, index, total }: { page: ResearchPage; index: 
           index === 0 ? 'question-transition' : ''
         }`}
       >
-        {page.step.text}
+        {page.step.kind === 'history' ? `How “${page.step.text}” has changed` : page.step.text}
       </h2>
     </header>
   );

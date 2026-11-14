@@ -8,6 +8,9 @@ import fastifyStatic from '@fastify/static';
 import type { RowDataPacket, ResultSetHeader } from 'mysql2/promise';
 import type {
   AnswerEvent,
+  ArticleHistory,
+  ArticleTimeline,
+  RevisionDiff,
   AnswerRequest,
   Brief,
   Exploration,
@@ -15,9 +18,17 @@ import type {
   Health,
   NewExploration,
   RewriteRequest,
+  SavedExploration,
   RewriteResponse,
+  SourcePlan,
+  ContextRequest,
+  ContextResponse,
 } from '@simsam/models';
-import { aiEnabled, createBrief, rewriteQuery, streamAnswer } from './ai.js';
+import { aiEnabled, createBrief, planSources, rewriteQuery, streamAnswer, summarizeContext } from './ai.js';
+import { searchWeb, webSearchEnabled } from './context.js';
+import { corpusArticles, corpusAvailable, corpusGraph, type CorpusGraph, relatedInCorpus, searchCorpus, type CorpusArticle, type CorpusHit, type RankedHit, type SearchCandidate } from './corpus.js';
+import { articleHistory } from './history.js';
+import { articleTimeline, revisionDiff } from './timeline.js';
 import { SpeechError, speechEnabled, synthesize, transcribe } from './speech.js';
 import { pool, migrate } from './db.js';
 
@@ -28,6 +39,9 @@ interface ExplorationRow extends RowDataPacket {
   /** JSON text in MariaDB; NULL for rows saved before follow-ups existed. */
   steps: string | ExplorationStep[] | null;
   created_at: Date;
+  /** Only selected where it's needed: it can be large. */
+  snapshot?: string | null;
+  has_snapshot?: number;
 }
 
 const toExploration = (row: ExplorationRow): Exploration => ({
@@ -40,7 +54,15 @@ const toExploration = (row: ExplorationRow): Exploration => ({
       ? (JSON.parse(row.steps) as ExplorationStep[])
       : (row.steps ?? [{ kind: 'question', text: row.question }]),
   createdAt: row.created_at.toISOString(),
+  hasSnapshot: Boolean(row.has_snapshot ?? (row.snapshot !== undefined && row.snapshot !== null)),
 });
+
+/** List columns: everything but the snapshot itself. */
+const LIST_COLUMNS = 'id, question, focus_title, steps, created_at, snapshot IS NOT NULL AS has_snapshot';
+
+/** A saved snapshot is opaque to the API: stored as given, returned as given. */
+// Under MariaDB's max_allowed_packet (16 MB by default).
+const MAX_SNAPSHOT_BYTES = 15 * 1024 * 1024;
 
 const explorationBody = {
   type: 'object',
@@ -57,18 +79,19 @@ const explorationBody = {
         required: ['kind', 'text'],
         additionalProperties: false,
         properties: {
-          kind: { type: 'string', enum: ['question', 'dive'] },
+          kind: { type: 'string', enum: ['question', 'dive', 'history'] },
           text: { type: 'string', minLength: 1, maxLength: 500 },
         },
       },
     },
+    snapshot: { type: 'object' },
   },
 } as const;
 
 const idParams = { type: 'object', properties: { id: { type: 'integer' } } } as const;
 
 async function findExploration(id: number) {
-  const [rows] = await pool.query<ExplorationRow[]>('SELECT * FROM explorations WHERE id = ?', [id]);
+  const [rows] = await pool.query<ExplorationRow[]>(`SELECT ${LIST_COLUMNS} FROM explorations WHERE id = ?`, [id]);
   return rows[0] ? toExploration(rows[0]) : undefined;
 }
 
@@ -83,6 +106,8 @@ app.get('/api/health', async (): Promise<Health> => ({
   timestamp: new Date().toISOString(),
   ai: aiEnabled,
   voice: speechEnabled,
+  corpus: await corpusAvailable(),
+  web: webSearchEnabled,
 }));
 
 // ---------- Speech (ElevenLabs) ----------
@@ -138,6 +163,180 @@ app.post<{ Body: { text: string } }>(
   },
 );
 
+// ---------- Local Wikipedia corpus (see ingest.ts) ----------
+// Each route answers from MariaDB; an empty result tells the browser to fall
+// back to the live Wikipedia API (the corpus covers three topic areas only).
+
+// The history panel: an article's substantial changes, scanned from its recent
+// revisions and stored in the system-versioned table (404 if it isn't in the corpus).
+app.post<{ Body: { title: string } }>(
+  '/api/article-history',
+  {
+    config: { rateLimit: { max: 20, timeWindow: '1 minute' } },
+    schema: {
+      body: {
+        type: 'object',
+        required: ['title'],
+        additionalProperties: false,
+        properties: { title: { type: 'string', minLength: 1, maxLength: 255 } },
+      },
+    },
+  },
+  async (req, reply): Promise<ArticleTimeline | void> => {
+    try {
+      const timeline = await articleTimeline(req.body.title, AbortSignal.timeout(90_000));
+      if (!timeline) return reply.code(404).send({ error: 'This article isn’t in the local collection.' });
+      return timeline;
+    } catch (err) {
+      req.log.warn(err, 'article history failed');
+      return reply.code(502).send({ error: 'The history couldn’t be read right now.' });
+    }
+  },
+);
+
+app.get<{ Querystring: { pageId: number; revisionId: number } }>(
+  '/api/article-history/diff',
+  {
+    config: { rateLimit: { max: 120, timeWindow: '1 minute' } },
+    schema: {
+      querystring: {
+        type: 'object',
+        required: ['pageId', 'revisionId'],
+        properties: { pageId: { type: 'integer', minimum: 1 }, revisionId: { type: 'integer', minimum: 1 } },
+      },
+    },
+  },
+  async (req, reply): Promise<RevisionDiff | void> => {
+    const diff = await revisionDiff(req.query.pageId, req.query.revisionId);
+    if (!diff) return reply.code(404).send({ error: 'This edit isn’t stored.' });
+    return diff;
+  },
+);
+
+// The topic map, built from MariaDB's vector index alone (404 without the corpus).
+app.post<{ Body: { title: string; seeds?: string[]; about?: string } }>(
+  '/api/graph',
+  {
+    config: { rateLimit: { max: 60, timeWindow: '1 minute' } },
+    schema: {
+      body: {
+        type: 'object',
+        required: ['title'],
+        additionalProperties: false,
+        properties: {
+          title: { type: 'string', minLength: 1, maxLength: 255 },
+          seeds: { type: 'array', maxItems: 10, items: { type: 'string', minLength: 1, maxLength: 255 } },
+          // The article's opening text, for a center outside the corpus.
+          about: { type: 'string', maxLength: 2000 },
+        },
+      },
+    },
+  },
+  async (req, reply): Promise<CorpusGraph | void> => {
+    const graph = await corpusGraph(req.body.title, req.body.seeds, req.body.about).catch((err) => {
+      req.log.warn(err, 'graph failed');
+      return null;
+    });
+    if (!graph) return reply.code(404).send({ error: 'The local collection isn’t available.' });
+    return graph;
+  },
+);
+
+app.post<{ Body: { query: string; limit?: number; candidates?: SearchCandidate[] } }>(
+  '/api/search',
+  {
+    config: { rateLimit: { max: 120, timeWindow: '1 minute' } },
+    schema: {
+      body: {
+        type: 'object',
+        required: ['query'],
+        additionalProperties: false,
+        properties: {
+          query: { type: 'string', minLength: 1, maxLength: 500 },
+          limit: { type: 'integer', minimum: 1, maximum: 20 },
+          // Live Wikipedia search results, ranked together with the corpus.
+          candidates: {
+            type: 'array',
+            maxItems: 10,
+            items: {
+              type: 'object',
+              required: ['title', 'snippet'],
+              additionalProperties: false,
+              properties: { title: { type: 'string', maxLength: 255 }, snippet: { type: 'string', maxLength: 1000 } },
+            },
+          },
+        },
+      },
+    },
+  },
+  async (req): Promise<{ results: RankedHit[] }> => ({
+    results: await searchCorpus(req.body.query, req.body.limit ?? 8, req.body.candidates).catch((err) => {
+      req.log.warn(err, 'corpus search failed');
+      return [];
+    }),
+  }),
+);
+
+app.get<{ Querystring: { title: string; limit?: number } }>(
+  '/api/related',
+  {
+    config: { rateLimit: { max: 240, timeWindow: '1 minute' } },
+    schema: {
+      querystring: {
+        type: 'object',
+        required: ['title'],
+        properties: {
+          title: { type: 'string', minLength: 1, maxLength: 255 },
+          limit: { type: 'integer', minimum: 1, maximum: 20 },
+        },
+      },
+    },
+  },
+  async (req): Promise<{ results: CorpusHit[] }> => ({
+    results: await relatedInCorpus(req.query.title, req.query.limit ?? 10).catch((err) => {
+      req.log.warn(err, 'related lookup failed');
+      return [];
+    }),
+  }),
+);
+
+app.post<{ Body: { titles: string[] } }>(
+  '/api/articles',
+  {
+    config: { rateLimit: { max: 120, timeWindow: '1 minute' } },
+    schema: {
+      body: {
+        type: 'object',
+        required: ['titles'],
+        additionalProperties: false,
+        properties: { titles: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'string', maxLength: 255 } } },
+      },
+    },
+  },
+  async (req): Promise<{ articles: (CorpusArticle | null)[] }> => ({ articles: await corpusArticles(req.body.titles) }),
+);
+
+// How an article changed over time, from its system-versioned history.
+app.post<{ Body: { title: string } }>(
+  '/api/history',
+  {
+    config: { rateLimit: { max: 20, timeWindow: '1 minute' } },
+    schema: {
+      body: {
+        type: 'object',
+        required: ['title'],
+        additionalProperties: false,
+        properties: { title: { type: 'string', minLength: 1, maxLength: 255 } },
+      },
+    },
+  },
+  async (req, reply): Promise<ArticleHistory | void> => {
+    const history = await articleHistory(req.body.title, AbortSignal.timeout(60_000));
+    if (!history) return reply.code(404).send({ error: 'That article’s history isn’t in the local collection.' });
+    return history;
+  },
+);
+
 // ---------- AI ----------
 
 const historySchema = {
@@ -171,6 +370,82 @@ app.post<{ Body: RewriteRequest }>(
     if (!aiEnabled) return reply.code(503).send({ error: 'AI is not configured' });
     const query = await rewriteQuery(req.body.question, req.body.history, AbortSignal.timeout(15_000));
     return { query: query || req.body.question };
+  },
+);
+
+// The AI picks its sources by calling tools: a Wikipedia search, and a web search
+// (context.dev) when the question needs more than encyclopedia intros.
+app.post<{ Body: RewriteRequest }>(
+  '/api/plan',
+  {
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+    schema: {
+      body: {
+        type: 'object',
+        required: ['question', 'history'],
+        additionalProperties: false,
+        properties: { question: { type: 'string', minLength: 1, maxLength: 500 }, history: historySchema },
+      },
+    },
+  },
+  async (req, reply): Promise<SourcePlan | void> => {
+    if (!aiEnabled) return reply.code(503).send({ error: 'AI is not configured' });
+    try {
+      return await planSources(req.body.question, req.body.history, AbortSignal.timeout(15_000));
+    } catch (err) {
+      req.log.warn(err, 'source planning failed');
+      return reply.code(502).send({ error: 'Sources could not be planned right now.' });
+    }
+  },
+);
+
+/** A web query for a context question: the page's topic is added unless the question already names it. */
+function contextQuery(question: string, topic: string) {
+  const q = question.trim().replace(/[?.!]+$/, '');
+  const topicWords = topic.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 3);
+  const named = topicWords.length > 0 && topicWords.some((w) => q.toLowerCase().includes(w));
+  return named ? q : `${topic} ${q}`;
+}
+
+// Context panel: web search (context.dev), kept apart from the Wikipedia page,
+// with a short AI summary of what the web adds.
+app.post<{ Body: ContextRequest }>(
+  '/api/context',
+  {
+    // Each search costs context.dev credits.
+    config: { rateLimit: { max: 15, timeWindow: '1 minute' } },
+    schema: {
+      body: {
+        type: 'object',
+        required: ['question', 'topic'],
+        additionalProperties: false,
+        properties: {
+          question: { type: 'string', minLength: 1, maxLength: 500 },
+          topic: { type: 'string', minLength: 1, maxLength: 255 },
+          query: { type: 'string', minLength: 1, maxLength: 300 },
+        },
+      },
+    },
+  },
+  async (req, reply): Promise<ContextResponse | void> => {
+    if (!webSearchEnabled) return reply.code(503).send({ error: 'Web search is not configured' });
+    const { question, topic } = req.body;
+    const query = req.body.query ?? contextQuery(question, topic);
+    let sources;
+    try {
+      sources = await searchWeb(query, AbortSignal.timeout(20_000));
+    } catch (err) {
+      req.log.warn(err, 'web search failed');
+      return reply.code(502).send({ error: 'Web search failed.' });
+    }
+    let summary: string | null = null;
+    if (aiEnabled && sources.length > 0) {
+      summary = await summarizeContext(question, topic, sources, AbortSignal.timeout(30_000)).catch((err) => {
+        req.log.warn(err, 'context summary failed');
+        return null;
+      });
+    }
+    return { query, sources, summary };
   },
 );
 
@@ -242,19 +517,33 @@ app.post<{ Body: AnswerRequest }>(
 
 app.get('/api/explorations', async (): Promise<Exploration[]> => {
   const [rows] = await pool.query<ExplorationRow[]>(
-    'SELECT * FROM explorations ORDER BY created_at DESC, id DESC LIMIT 100',
+    `SELECT ${LIST_COLUMNS} FROM explorations ORDER BY created_at DESC, id DESC LIMIT 100`,
   );
   return rows.map(toExploration);
 });
 
+// One saved exploration with its snapshot, to open it as it was.
+app.get<{ Params: { id: number } }>(
+  '/api/explorations/:id',
+  { schema: { params: idParams } },
+  async (req, reply): Promise<SavedExploration | void> => {
+    const [rows] = await pool.query<ExplorationRow[]>('SELECT * FROM explorations WHERE id = ?', [req.params.id]);
+    if (!rows[0]) return reply.code(404).send({ error: 'Not Found' });
+    const snapshot = rows[0].snapshot ? (JSON.parse(rows[0].snapshot) as unknown) : null;
+    return { ...toExploration(rows[0]), snapshot };
+  },
+);
+
+const snapshotText = (snapshot: unknown) => (snapshot === undefined ? null : JSON.stringify(snapshot));
+
 app.post<{ Body: NewExploration }>(
   '/api/explorations',
-  { schema: { body: explorationBody } },
+  { schema: { body: explorationBody }, bodyLimit: MAX_SNAPSHOT_BYTES },
   async (req, reply): Promise<Exploration> => {
-    const { focusTitle, steps } = req.body;
+    const { focusTitle, steps, snapshot } = req.body;
     const [result] = await pool.execute<ResultSetHeader>(
-      'INSERT INTO explorations (question, focus_title, steps) VALUES (?, ?, ?)',
-      [steps[0].text, focusTitle, JSON.stringify(steps)],
+      'INSERT INTO explorations (question, focus_title, steps, snapshot) VALUES (?, ?, ?, ?)',
+      [steps[0].text, focusTitle, JSON.stringify(steps), snapshotText(snapshot)],
     );
     reply.code(201);
     return (await findExploration(result.insertId))!;
@@ -264,12 +553,12 @@ app.post<{ Body: NewExploration }>(
 // Saving again after follow-ups replaces the steps of the same exploration.
 app.put<{ Params: { id: number }; Body: NewExploration }>(
   '/api/explorations/:id',
-  { schema: { params: idParams, body: explorationBody } },
+  { schema: { params: idParams, body: explorationBody }, bodyLimit: MAX_SNAPSHOT_BYTES },
   async (req, reply) => {
-    const { focusTitle, steps } = req.body;
+    const { focusTitle, steps, snapshot } = req.body;
     const [result] = await pool.execute<ResultSetHeader>(
-      'UPDATE explorations SET question = ?, focus_title = ?, steps = ? WHERE id = ?',
-      [steps[0].text, focusTitle, JSON.stringify(steps), req.params.id],
+      'UPDATE explorations SET question = ?, focus_title = ?, steps = ?, snapshot = ? WHERE id = ?',
+      [steps[0].text, focusTitle, JSON.stringify(steps), snapshotText(snapshot), req.params.id],
     );
     if (result.affectedRows === 0) return reply.code(404).send({ error: 'Not Found' });
     return findExploration(req.params.id);

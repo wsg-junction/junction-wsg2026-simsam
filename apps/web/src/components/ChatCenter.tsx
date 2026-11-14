@@ -328,9 +328,10 @@ export function ChatComposer({ onAsk, onPhoto, mode, onModeChange, modes, docked
 export function ChatCenter({ log, composer }: { log: LogProps; composer: Omit<ComposerProps, 'expand' | 'docked'> }) {
   const [open, setOpen] = useState(false);
   const latest = log.entries[log.entries.length - 1];
+  // The wrapper fills the canvas (not just its bottom edge), so the open card is capped to it and never reaches the nav above.
   return (
-    <div className="pointer-events-none absolute inset-x-0 bottom-0 z-30 flex justify-center px-3 pb-3 sm:px-6 sm:pb-5">
-      <div className="pointer-events-auto flex w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-[0_12px_40px_-12px_rgb(0_0_0/0.45)]">
+    <div className="pointer-events-none absolute inset-0 z-30 flex items-end justify-center px-3 pt-3 pb-3 sm:px-6 sm:pb-5">
+      <div className="pointer-events-auto flex max-h-full min-h-0 w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-[0_12px_40px_-12px_rgb(0_0_0/0.45)]">
         {latest && (
           <button
             type="button"
@@ -346,7 +347,7 @@ export function ChatCenter({ log, composer }: { log: LogProps; composer: Omit<Co
           </button>
         )}
         {open ? (
-          <div id="chat-history" className="max-h-[min(60vh,34rem)] overflow-y-auto border-b border-separator px-5 py-4">
+          <div id="chat-history" className="max-h-[min(60vh,34rem)] min-h-0 flex-1 overflow-y-auto border-b border-separator px-5 py-4">
             <h2 className="sr-only">Questions and answers</h2>
             <ChatLog {...log} />
           </div>

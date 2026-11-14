@@ -29,10 +29,12 @@ import type {
   DeepReportRequest,
   FactCheckReport,
   FactCheckRequest,
+  ImageSearchResponse,
 } from '@simsam/models';
 import {
   aiEnabled,
   aiEndpoint,
+  analyzePhoto,
   createBrief,
   planSources,
   rewriteQuery,
@@ -46,6 +48,7 @@ import { searchWeb, webSearchEnabled } from './context.js';
 import { corpusArticles, corpusAvailable, corpusGraph, type CorpusGraph, relatedInCorpus, searchCorpus, type CorpusArticle, type CorpusHit, type RankedHit, type SearchCandidate } from './corpus.js';
 import { articleHistory } from './history.js';
 import { articleTimeline, revisionDiff } from './timeline.js';
+import { storePhoto, storageEndpoint } from './storage.js';
 import { SpeechError, speechEnabled, synthesize, transcribe } from './speech.js';
 import { pool, migrate } from './db.js';
 
@@ -117,7 +120,7 @@ const app = Fastify({ logger: true, trustProxy: true });
 await app.register(cors);
 await app.register(rateLimit, { global: false });
 await migrate();
-app.log.info({ model: aiEnabled ? aiEndpoint : 'off', factcheck: factCheckEnabled ? GEMINI_MODEL : 'off' }, 'AI endpoints');
+app.log.info({ model: aiEnabled ? aiEndpoint : 'off', factcheck: factCheckEnabled ? GEMINI_MODEL : 'off', photoStorage: storageEndpoint }, 'AI endpoints');
 
 /** Deep research reads the MariaDB collection, so it needs both the AI and the corpus. */
 const deepAvailable = async () => aiEnabled && (await corpusAvailable());
@@ -131,7 +134,50 @@ app.get('/api/health', async (): Promise<Health> => ({
   web: webSearchEnabled,
   deep: await deepAvailable(),
   factcheck: factCheckEnabled,
+  image: aiEnabled,
 }));
+
+// ---------- Search by photo ----------
+
+// The browser posts the (downscaled) photo as the raw body. 6 MB is far above
+// what the web client sends (about 200 KB), but allows other clients.
+const PHOTO_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+app.addContentTypeParser(/^image\//, { parseAs: 'buffer', bodyLimit: 6 * 1024 * 1024 }, (_req, body, done) =>
+  done(null, body),
+);
+
+// Keep the photo in Verda object storage and let the vision model read it; the
+// client then searches Wikipedia with the query it returns. Storage is best effort.
+app.post<{ Body: Buffer }>(
+  '/api/image-search',
+  { config: { rateLimit: { max: 15, timeWindow: '1 minute' } } },
+  async (req, reply): Promise<ImageSearchResponse | void> => {
+    const type = (req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0 || !PHOTO_TYPES.includes(type)) {
+      return reply.code(400).send({ error: 'Send a JPEG, PNG or WebP image as the request body.' });
+    }
+    if (!aiEnabled) return reply.code(503).send({ error: 'Searching by photo isn’t set up on this server.' });
+    const bytes = req.body;
+    const stored = storePhoto(bytes, type, AbortSignal.timeout(20_000)).catch((err) => {
+      req.log.warn(err, 'storing the photo failed');
+      return null;
+    });
+    try {
+      const seen = await analyzePhoto(
+        { dataUrl: `data:${type};base64,${bytes.toString('base64')}` },
+        AbortSignal.timeout(45_000),
+      );
+      if (!seen) return reply.code(422).send({ error: 'I couldn’t tell what this photo shows. Try another one.' });
+      return { query: seen.query, description: seen.description, stored: (await stored) !== null };
+    } catch (err) {
+      req.log.error(err, 'photo analysis failed');
+      // The model refused the image itself (unreadable, or flagged by its content screening).
+      const status = (err as { status?: number }).status;
+      if (status === 400 || status === 422) return reply.code(422).send({ error: 'I couldn’t read this photo. Try another one.' });
+      return reply.code(502).send({ error: 'The photo couldn’t be read right now.' });
+    }
+  },
+);
 
 // ---------- Speech (ElevenLabs) ----------
 

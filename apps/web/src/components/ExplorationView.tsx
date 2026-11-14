@@ -25,6 +25,7 @@ import {
   type PageBrief,
   type ResearchPage,
 } from '../lib/research';
+import { PhotoError, preparePhoto, searchByPhoto } from '../lib/image';
 import { fetchArticleTimeline, TimelineUnavailableError } from '../lib/history';
 import { buildGraph, MAX_DEPTH, NoResultsError } from '../lib/wikipedia';
 import { ChatCenter, ChatComposer, ChatLog, type AskMode, type ChatEntry } from './ChatCenter';
@@ -170,6 +171,8 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave, initial
   };
   // The side panel exists beside the canvas only on wide screens.
   const [desktop, setDesktop] = useState(() => window.matchMedia('(min-width: 1024px)').matches);
+  const [panelWidth, setPanelWidth] = useState<number | null>(null);
+  const [resizingPanel, setResizingPanel] = useState(false);
   useEffect(() => {
     const m = window.matchMedia('(min-width: 1024px)');
     const on = () => setDesktop(m.matches);
@@ -338,7 +341,7 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave, initial
     const id = existingId ?? ++entryId;
     setEntries((list) =>
       existingId
-        ? list.map((e) => (e.id === id ? { id, step, status: 'pending' } : e))
+        ? list.map((e) => (e.id === id ? { id, step, status: 'pending', photo: e.photo } : e))
         : [...list, { id, step, status: 'pending' }],
     );
     queue.current = queue.current.then(async () => {
@@ -377,7 +380,7 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave, initial
         pagesRef.current = [...pagesRef.current, page];
         setPages(pagesRef.current);
         setEntries((list) =>
-          list.map((e) => (e.id === id ? { id, step, status: 'done', reply: replyFor(page, index), page: index } : e)),
+          list.map((e) => (e.id === id ? { id, step, status: 'done', reply: replyFor(page, index), page: index, photo: e.photo } : e)),
         );
         await ensureContent(index, modeRef.current);
       } catch (err) {
@@ -387,7 +390,7 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave, initial
             : err instanceof NoResultsError
               ? 'No Wikipedia articles match this. Try naming the person, place or idea.'
               : 'Wikipedia didn’t respond. Check your connection.';
-        setEntries((list) => list.map((e) => (e.id === id ? { id, step, status: 'error', message } : e)));
+        setEntries((list) => list.map((e) => (e.id === id ? { id, step, status: 'error', message, photo: e.photo } : e)));
       }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -428,6 +431,7 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave, initial
   const [webOn, setWebOn] = useState(false);
   const [deepOn, setDeepOn] = useState(false);
   const [factOn, setFactOn] = useState(false);
+  const [imageOn, setImageOn] = useState(false);
   useEffect(() => {
     let live = true;
     serverFeatures().then((h) => {
@@ -436,6 +440,7 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave, initial
       setWebOn(h?.web === true);
       setDeepOn(h?.deep === true);
       setFactOn(h?.factcheck === true);
+      setImageOn(h?.image === true);
     });
     return () => {
       live = false;
@@ -529,7 +534,7 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave, initial
       pageId: page.id,
       contextId: cid,
     };
-    setEntries((list) => (list.some((e) => e.id === id) ? list.map((e) => (e.id === id ? entry : e)) : [...list, entry]));
+    setEntries((list) => (list.some((e) => e.id === id) ? list.map((e) => (e.id === id ? { ...entry, photo: e.photo } : e)) : [...list, entry]));
     loadContext(page, { id: cid, question: text, auto: false, state: { status: 'loading' } }, query ?? undefined);
     revealSide('context');
   };
@@ -547,7 +552,41 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave, initial
     }
     run({ kind: 'question', text });
   };
+  // Searching by photo: the server keeps it in object storage and has the AI read it;
+  // what it saw then goes on as a normal question (or a context request).
+  const photos = useRef(new Map<number, { blob: Blob; how: AskMode }>());
+  const readPhoto = async (id: number, blob: Blob, how: AskMode) => {
+    setEntries((list) =>
+      list.map((e) => (e.id === id ? { id, step: e.step, photo: e.photo, status: 'pending', routing: true, reading: true } : e)),
+    );
+    try {
+      const seen = await searchByPhoto(blob);
+      photos.current.delete(id);
+      const page = activeRef.current;
+      if (how === 'context' && page) return askContext(seen.query, page, null, id);
+      return run({ kind: 'question', text: seen.query }, id);
+    } catch (err) {
+      const message = err instanceof PhotoError ? err.message : 'The photo couldn’t be read right now.';
+      setEntries((list) => list.map((e) => (e.id === id ? { id, step: e.step, photo: e.photo, status: 'error', message } : e)));
+    }
+  };
+  const askPhoto = async (file: File, how: AskMode) => {
+    if (chatDocked) setSideTab('chat');
+    const id = ++entryId;
+    const step = { kind: 'question', text: 'Photo' } as const;
+    try {
+      const { blob, thumbnail } = await preparePhoto(file);
+      photos.current.set(id, { blob, how });
+      setEntries((list) => [...list, { id, step, photo: thumbnail, status: 'pending', routing: true, reading: true }]);
+      void readPhoto(id, blob, how);
+    } catch (err) {
+      const message = err instanceof PhotoError ? err.message : 'This image couldn’t be opened.';
+      setEntries((list) => [...list, { id, step, status: 'error', message, canRetry: false }]);
+    }
+  };
   const retry = (entry: ChatEntry) => {
+    const photo = photos.current.get(entry.id);
+    if (photo) return void readPhoto(entry.id, photo.blob, photo.how);
     if (entry.status === 'context') {
       const page = pagesRef.current.find((p) => p.id === entry.pageId);
       const ctx = contexts[entry.pageId]?.find((c) => c.id === entry.contextId);
@@ -661,6 +700,7 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave, initial
   };
   const composerProps = {
     onAsk: (q: string, how: AskMode) => void ask(q, how),
+    onPhoto: imageOn ? (file: File, how: AskMode) => void askPhoto(file, how) : undefined,
     mode: askMode,
     onModeChange: setAskMode,
     modes: (webOn ? ['auto', 'articles', 'context'] : ['articles']) as AskMode[],
@@ -916,10 +956,50 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave, initial
 
         <aside
           aria-label={sideTabs.length === 1 ? 'Topic map' : sideName}
-          className={`border-border bg-surface transition-[width] duration-300 motion-reduce:transition-none lg:flex lg:shrink-0 lg:flex-col lg:border-l ${
+          style={desktop && !mapCollapsed ? { width: panelWidth ?? undefined, maxWidth: 'calc(100% - 320px)' } : undefined}
+          className={`relative border-border bg-surface ${resizingPanel ? 'select-none' : 'transition-[width] duration-300 motion-reduce:transition-none'} lg:flex lg:shrink-0 lg:flex-col lg:border-l ${
             mapCollapsed ? 'lg:w-14' : 'lg:w-[28rem] xl:w-[32rem]'
           } ${mobileTab === 'research' ? 'max-lg:hidden' : 'max-lg:flex-1'}`}
         >
+          {!mapCollapsed && (
+            <div
+              role="separator"
+              aria-label="Resize side panel"
+              aria-orientation="vertical"
+              aria-valuemin={280}
+              aria-valuenow={panelWidth ?? (window.innerWidth >= 1280 ? 512 : 448)}
+              tabIndex={0}
+              title="Drag to resize; use arrow keys when focused"
+              className="absolute inset-y-0 -left-1 z-40 hidden w-2 touch-none cursor-col-resize items-center justify-center outline-none hover:bg-accent/20 focus-visible:bg-accent/20 lg:flex"
+              onPointerDown={(event) => {
+                if (event.button !== 0) return;
+                event.preventDefault();
+                event.currentTarget.setPointerCapture(event.pointerId);
+                setResizingPanel(true);
+              }}
+              onPointerMove={(event) => {
+                if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+                const panel = event.currentTarget.parentElement!;
+                const max = Math.max(280, panel.parentElement!.clientWidth - 320);
+                setPanelWidth(Math.min(max, Math.max(280, panel.getBoundingClientRect().right - event.clientX)));
+              }}
+              onPointerUp={(event) => {
+                if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+                setResizingPanel(false);
+              }}
+              onLostPointerCapture={() => setResizingPanel(false)}
+              onKeyDown={(event) => {
+                if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+                event.preventDefault();
+                const panel = event.currentTarget.parentElement!;
+                const max = Math.max(280, panel.parentElement!.clientWidth - 320);
+                const change = event.key === 'ArrowLeft' ? 24 : -24;
+                setPanelWidth(Math.min(max, Math.max(280, panel.getBoundingClientRect().width + change)));
+              }}
+            >
+              <span aria-hidden className="h-8 w-0.5 rounded-full bg-border" />
+            </div>
+          )}
           {/* Collapsed (desktop only): a slim rail with every tab, each opening the panel on that tab. */}
           {mapCollapsed && (
             <nav aria-label="Side panel" className="flex h-full flex-col items-center gap-1 pt-3 max-lg:hidden">

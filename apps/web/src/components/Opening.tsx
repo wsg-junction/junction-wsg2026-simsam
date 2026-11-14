@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
-import { Button, Form, Input, TextField } from '@heroui/react';
+import { Button, Form, Input, Spinner, TextField } from '@heroui/react';
 import { serverFeatures } from '../lib/ai';
+import { PhotoError, preparePhoto, searchByPhoto } from '../lib/image';
+import { PhotoButton } from './PhotoButton';
 import { useVoiceControls, VoiceButtons, VoiceStatusRows } from './VoiceControls';
 
 const EXAMPLES = [
@@ -13,15 +15,34 @@ const EXAMPLES = [
 export function Opening({ onExplore }: { onExplore: (question: string, deep?: boolean) => void }) {
   const [question, setQuestion] = useState('');
   const [deepOn, setDeepOn] = useState(false);
+  const [imageOn, setImageOn] = useState(false);
+  const [photo, setPhoto] = useState<{ status: 'reading' } | { status: 'error'; message: string } | null>(null);
   useEffect(() => {
     let live = true;
-    serverFeatures().then((h) => live && setDeepOn(h?.deep === true));
+    serverFeatures().then((h) => {
+      if (!live) return;
+      setDeepOn(h?.deep === true);
+      setImageOn(h?.image === true);
+    });
     return () => {
       live = false;
     };
   }, []);
   // Spoken questions start an exploration straight away, like pressing Explore.
   const voice = useVoiceControls(onExplore);
+
+  // A photo: the server keeps it and has the AI read it, then the exploration starts from what it saw.
+  async function searchPhoto(file: File) {
+    setPhoto({ status: 'reading' });
+    try {
+      const { blob } = await preparePhoto(file);
+      const seen = await searchByPhoto(blob);
+      setPhoto(null);
+      onExplore(seen.query);
+    } catch (err) {
+      setPhoto({ status: 'error', message: err instanceof PhotoError ? err.message : 'The photo couldn’t be read right now.' });
+    }
+  }
 
   function submit(e: { preventDefault(): void }) {
     e.preventDefault();
@@ -42,7 +63,7 @@ export function Opening({ onExplore }: { onExplore: (question: string, deep?: bo
           What do you want to explore?
         </h1>
 
-        <Form onSubmit={submit} className="mt-8 flex flex-col gap-4 sm:flex-row sm:items-end">
+        <Form onSubmit={submit} className="mt-8 flex flex-col gap-4 md:flex-row md:items-end">
           <TextField
             aria-labelledby="opening-title"
             name="question"
@@ -56,16 +77,19 @@ export function Opening({ onExplore }: { onExplore: (question: string, deep?: bo
               className="question-input font-serif text-xl sm:text-2xl"
             />
           </TextField>
-          <div className="flex shrink-0 items-center gap-2">
-            <VoiceButtons controls={voice} size="lg" />
-            <Button type="submit" size="lg" className="shrink-0">
+          <div className="flex shrink-0 flex-wrap items-center gap-2 max-md:w-full">
+            <div className="flex items-center gap-2 max-md:w-full">
+            {imageOn && <PhotoButton size="lg" onFile={(f) => void searchPhoto(f)} isPending={photo?.status === 'reading'} />}
+              <VoiceButtons controls={voice} size="lg" />
+            </div>
+            <Button type="submit" size="lg" className="shrink-0 max-md:flex-1">
               Explore
             </Button>
             {deepOn && (
               <Button
                 size="lg"
                 variant="secondary"
-                className="shrink-0"
+                className="shrink-0 max-md:flex-1"
                 isDisabled={!question.trim()}
                 onPress={() => question.trim() && onExplore(question.trim(), true)}
               >
@@ -75,6 +99,18 @@ export function Opening({ onExplore }: { onExplore: (question: string, deep?: bo
           </div>
         </Form>
         <VoiceStatusRows controls={voice} rowClassName="mt-4" />
+        {photo && (
+          <p role="status" className="mt-4 inline-flex items-center gap-2 text-sm text-muted">
+            {photo.status === 'reading' ? (
+              <>
+                <Spinner size="sm" aria-hidden />
+                Looking at your photo…
+              </>
+            ) : (
+              photo.message
+            )}
+          </p>
+        )}
 
         <p className="mt-3 text-sm text-muted">
           Answers are mapped from Wikipedia articles, with every passage linked to its source.

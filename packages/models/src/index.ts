@@ -13,6 +13,8 @@ export interface Health {
   deep: boolean;
   /** Whether the fact-checker (Gemini with Google Search grounding) is configured. */
   factcheck: boolean;
+  /** Whether searching by photo is available (POST /api/image-search): the vision model is configured. */
+  image: boolean;
 }
 
 /** A passage from a web page found by web search (context.dev), used as a source next to Wikipedia. */
@@ -434,4 +436,14 @@ export interface FactCheckReport {
   checkedAt: string;
   model: string;
   claims: FactCheckClaim[];
+}
+
+/** POST /api/image-search (the photo as the request body, image/jpeg|png|webp): what the vision model saw, as a search. */
+export interface ImageSearchResponse {
+  /** A Wikipedia search query naming what the photo shows. */
+  query: string;
+  /** One or two plain sentences on what the photo shows. */
+  description: string;
+  /** Whether the photo was also kept in object storage. */
+  stored: boolean;
 }

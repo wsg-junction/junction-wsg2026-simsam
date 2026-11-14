@@ -4,6 +4,7 @@ import type { ExplorationStep } from '@simsam/models';
 import type { PageAnswer } from '../lib/research';
 import { CitedText, withoutCitations } from './Cite';
 import type { ContextEntry } from './ContextPanel';
+import { PhotoButton } from './PhotoButton';
 import { useVoiceControls, VoiceButtons, VoiceStatusRows } from './VoiceControls';
 
 /** Where a typed question goes: the AI decides, a new page of articles, or the context panel. */
@@ -12,9 +13,11 @@ export type AskMode = 'auto' | 'articles' | 'context';
 export type ChatEntry = {
   id: number;
   step: ExplorationStep;
+  /** Asked with a photo: its thumbnail (a data URL). The step's text is what the AI saw in it. */
+  photo?: string;
 } & (
-  | { status: 'pending'; /** The AI is deciding between articles and context. */ routing?: boolean }
-  | { status: 'error'; message: string }
+  | { status: 'pending'; /** The AI is deciding between articles and context. */ routing?: boolean; /** The AI is looking at the photo. */ reading?: boolean }
+  | { status: 'error'; message: string; /** False when trying again can't help (the photo wasn't readable). */ canRetry?: boolean }
   | {
       status: 'done';
       reply: string;
@@ -67,9 +70,14 @@ export function ChatLog({ entries, ...actions }: LogProps) {
       {entries.map((entry) => (
         <li key={entry.id} className="flex flex-col gap-1.5">
           <p className="text-xs text-muted">
-{entry.step.kind === 'dive' ? 'You dove into' : entry.status === 'context' ? 'You asked for context' : 'You asked'}
+{entry.step.kind === 'dive' ? 'You dove into' : entry.photo ? 'You searched with a photo' : entry.status === 'context' ? 'You asked for context' : 'You asked'}
           </p>
-          <p className="font-serif text-lg leading-snug">{entry.step.text}</p>
+          <div className="flex items-start gap-3">
+            {entry.photo && <img src={entry.photo} alt="The photo you searched with" className="size-14 shrink-0 rounded-lg border border-border object-cover" />}
+            {!(entry.photo && entry.status === 'pending' && entry.reading) && !(entry.status === 'error' && entry.step.text === 'Photo') && (
+              <p className="font-serif text-lg leading-snug">{entry.step.text}</p>
+            )}
+          </div>
           <div className="mt-1 border-l-2 border-accent pl-3">
             <Status entry={entry} {...actions} />
           </div>
@@ -103,14 +111,16 @@ function Status({
     // Streaming text would be announced word by word, so the live region waits for the finished answer.
     <div aria-live={streaming ? 'off' : 'polite'} className="flex flex-col gap-2 text-sm leading-relaxed">
       {entry.status === 'pending' &&
-        busyLine(entry.routing ? 'Deciding: new articles or context…' : preview ? `Researching “${entry.step.text}”…` : 'Researching on Wikipedia…')}
+        busyLine(entry.reading ? 'Looking at your photo…' : entry.routing ? 'Deciding: new articles or context…' : preview ? `Researching “${entry.step.text}”…` : 'Researching on Wikipedia…')}
 
       {entry.status === 'error' && (
         <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <span>{entry.message}</span>
-          <button type="button" onClick={() => onRetry(entry)} className={link}>
-            Try again
-          </button>
+          {entry.canRetry !== false && (
+            <button type="button" onClick={() => onRetry(entry)} className={link}>
+              Try again
+            </button>
+          )}
         </span>
       )}
 
@@ -198,6 +208,8 @@ const PLACEHOLDER: Record<AskMode, string> = {
 
 interface ComposerProps {
   onAsk: (question: string, mode: AskMode) => void;
+  /** Search with a photo (taken with the camera or picked from the device); unset when the server can't read images. */
+  onPhoto?: (file: File, mode: AskMode) => void;
   mode: AskMode;
   onModeChange: (mode: AskMode) => void;
   /** The modes this server offers, in order (Auto first). One or none: no switch, questions go to articles. */
@@ -209,7 +221,7 @@ interface ComposerProps {
 }
 
 /** The one input: questions go to a new page of articles or to the context panel. */
-export function ChatComposer({ onAsk, mode, onModeChange, modes, docked, onToggleDock, expand }: ComposerProps) {
+export function ChatComposer({ onAsk, onPhoto, mode, onModeChange, modes, docked, onToggleDock, expand }: ComposerProps) {
   const [text, setText] = useState('');
   const switchable = modes.length > 1;
   const effective: AskMode = switchable && modes.includes(mode) ? mode : 'articles';
@@ -259,7 +271,8 @@ export function ChatComposer({ onAsk, mode, onModeChange, modes, docked, onToggl
           {docked ? 'Move to the middle' : 'Move to side panel'}
         </button>
       </div>
-      <Form onSubmit={submit} className="flex items-center gap-2 p-2 pl-3 max-lg:gap-1.5 max-lg:pl-2">
+      {/* Narrow screens: the input gets its own full-width row; mode, photo, voice and Ask sit below it. */}
+      <Form onSubmit={submit} className="flex flex-wrap items-center gap-2 p-2 pl-3 max-lg:px-3 max-lg:pb-3 lg:flex-nowrap">
         {expand && (
           <Button
             isIconOnly
@@ -293,13 +306,16 @@ export function ChatComposer({ onAsk, mode, onModeChange, modes, docked, onToggl
             </svg>
           </label>
         )}
-        <TextField aria-label={PLACEHOLDER[effective]} value={text} onChange={setText} className="min-w-0 flex-1">
-          <Input placeholder={PLACEHOLDER[effective]} className="chat-input text-base" />
+        <TextField aria-label={PLACEHOLDER[effective]} value={text} onChange={setText} className="min-w-0 flex-1 max-lg:order-first max-lg:basis-full">
+          <Input placeholder={PLACEHOLDER[effective]} className="chat-input text-base max-lg:w-full" />
         </TextField>
-        <VoiceButtons controls={voice} />
-        <Button type="submit" size="sm" className="shrink-0">
-          Ask
-        </Button>
+        <div className="flex shrink-0 items-center gap-1.5 max-lg:ml-auto">
+          {onPhoto && <PhotoButton onFile={(file) => onPhoto(file, modeRef.current)} />}
+          <VoiceButtons controls={voice} />
+          <Button type="submit" size="sm" className="shrink-0">
+            Ask
+          </Button>
+        </div>
       </Form>
     </div>
   );
@@ -379,7 +395,7 @@ function DockIcon({ docked }: { docked: boolean }) {
 
 /** The latest entry as one line, for the collapsed chat on phones. */
 function previewLine(entry: ChatEntry) {
-  if (entry.status === 'pending') return entry.routing ? 'Deciding: new articles or context…' : `Researching “${entry.step.text}”…`;
+  if (entry.status === 'pending') return entry.reading ? 'Looking at your photo…' : entry.routing ? 'Deciding: new articles or context…' : `Researching “${entry.step.text}”…`;
   if (entry.status === 'error') return entry.message;
   if (entry.status === 'context') {
     if (entry.state?.status === 'ready') return entry.state.result.summary ? withoutCitations(entry.state.result.summary) : 'Web context found';

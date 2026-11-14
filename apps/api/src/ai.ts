@@ -578,6 +578,57 @@ export async function readFigure(image: { dataUrl: string; caption: string; arti
 }
 
 
+// ---------- Search by photo (vision) ----------
+
+const PHOTO_SYSTEM = `A reader photographed or picked an image to look something up on Wikipedia. Work out what it shows and what they would most likely want to read about. Reply with JSON only:
+
+{"description": string, "query": string}
+
+- description: one or two plain sentences on what the image shows (any visible text, names, places, objects, artworks, buildings, people only if a caption or sign names them).
+- query: a short Wikipedia search query (2 to 8 words) naming the most specific subject you can identify with confidence (a landmark, artwork, species, object, event, map or chart topic). If you can't identify it, name the most useful general topic.
+- Never identify a person from their face. For a photo of a person, describe what they are doing or wearing and search for that, unless a caption or sign names them.
+- Plain text only.`;
+
+/** What a photo shows and a Wikipedia search for it, read by the vision model. */
+export async function analyzePhoto(photo: { dataUrl: string }, signal?: AbortSignal) {
+  // The model occasionally answers without usable JSON: one more try.
+  return (await readPhoto(photo, signal)) ?? (await readPhoto(photo, signal));
+}
+
+async function readPhoto(photo: { dataUrl: string }, signal?: AbortSignal) {
+  if (!client) throw new Error('AI is not configured');
+  const params: NvidiaParams<ChatCompletionCreateParams> = {
+    model: MODEL,
+    messages: [
+      { role: 'system', content: PHOTO_SYSTEM },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'JSON:' },
+          { type: 'image_url', image_url: { url: photo.dataUrl } },
+        ],
+      },
+    ],
+    temperature: 0.1,
+    max_tokens: 300,
+    stream: false,
+    chat_template_kwargs: { enable_thinking: false },
+  };
+  const completion = await client.chat.completions.create(params as ChatCompletionCreateParams & { stream: false }, {
+    signal,
+  });
+  const content = completion.choices[0]?.message?.content ?? '';
+  let parsed: { description?: unknown; query?: unknown } = {};
+  try {
+    parsed = JSON.parse(content.slice(content.indexOf('{'), content.lastIndexOf('}') + 1));
+  } catch {
+    return null;
+  }
+  const description = typeof parsed.description === 'string' ? parsed.description.replace(/\s+/g, ' ').trim().slice(0, 400) : '';
+  const query = cleanQuery(parsed.query);
+  return query ? { description, query } : null;
+}
+
 // ---------- JSON completions (deep research reports) ----------
 
 export const CHAT_MODEL = MODEL;

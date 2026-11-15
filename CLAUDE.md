@@ -58,6 +58,11 @@ scripts/          Wikipedia data collection (fetch-wikipedia.mjs, expand-wikiped
 data/wikipedia-en Collected articles (JSON per article, gitignored, ~1.5 GB, not in the Docker image)
 deploy/           Production docker compose (app + MariaDB + Caddy), Caddyfile
 .github/workflows/ci.yml   Build, test, push image, deploy over SSH
+Dockerfile        Self-contained image build (local use: npm ci + vite build inside)
+Dockerfile.ci     The image CI deploys: no network. CI runs npm ci + vite build on the runner and this
+                  only copies the result in (+ Dockerfile.ci.dockerignore). Why: on CRACI runners all
+                  HTTPS goes through CRACI's proxy; the runner trusts it, a Docker build step doesn't
+                  (npm ci failed with UNABLE_TO_VERIFY_LEAF_SIGNATURE, also with the CA passed as a secret)
 ```
 
 ## Commands

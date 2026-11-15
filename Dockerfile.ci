@@ -1,0 +1,16 @@
+# The image CI deploys. Unlike Dockerfile, nothing here touches the network: CI installs
+# and builds on the runner first (npm ci, vite build), then this just copies the result in.
+# On CRACI runners all HTTPS goes through CRACI's proxy; the runner trusts it, but a
+# Docker build step does not (npm ci failed there with UNABLE_TO_VERIFY_LEAF_SIGNATURE).
+# Needs node_modules and apps/web/dist to exist in the build context (see
+# Dockerfile.ci.dockerignore) and the same platform as the runner (linux, x64).
+FROM node:26-slim
+WORKDIR /app
+COPY . .
+
+# What is running: shown on the Health page.
+ARG BUILD_SHA=
+ARG BUILD_TIME=
+ENV NODE_ENV=production PORT=3000 BUILD_SHA=$BUILD_SHA BUILD_TIME=$BUILD_TIME
+EXPOSE 3000
+CMD ["npm", "start", "-w", "api"]

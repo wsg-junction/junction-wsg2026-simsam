@@ -1,0 +1,7 @@
+# For Dockerfile.ci: like .dockerignore, but node_modules and the built web app are wanted.
+.git
+.github
+*.log
+.env
+data
+scripts/*.test.mjs

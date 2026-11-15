@@ -47,6 +47,16 @@ jobs:
 
       - uses: actions/checkout@v4
 
+      # Install and build here, on the runner, and let the image just copy the result in
+      # (Dockerfile.ci): on CRACI the runner trusts CRACI's HTTPS proxy, a Docker build step doesn't.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build -w web
+
       - name: Build and push image
         id: image
         env:
@@ -54,12 +64,7 @@ jobs:
           REGISTRY_SECRET: ${{ secrets.VERDA_REGISTRY_SECRET }}
         run: |
           echo "$REGISTRY_SECRET" | docker login "$REGISTRY" -u "$REGISTRY_USER" --password-stdin
-          # On CRACI the job's CA certificate is passed into the build so npm trusts CRACI's proxy.
-          ca_args=()
-          if [ -f /usr/local/share/ca-certificates/craci.crt ]; then
-            ca_args=(--secret id=extra-ca,src=/usr/local/share/ca-certificates/craci.crt)
-          fi
-          docker build "${ca_args[@]}" --build-arg BUILD_SHA="${{ github.sha }}" --build-arg BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" -t "$IMAGE" .
+          docker build -f Dockerfile.ci --build-arg BUILD_SHA="${{ github.sha }}" --build-arg BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" -t "$IMAGE" .
           docker push "$IMAGE"
           digest="$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE")"
           echo "digest=${digest#*@}" >> "$GITHUB_OUTPUT"

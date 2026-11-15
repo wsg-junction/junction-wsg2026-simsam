@@ -54,7 +54,12 @@ jobs:
           REGISTRY_SECRET: ${{ secrets.VERDA_REGISTRY_SECRET }}
         run: |
           echo "$REGISTRY_SECRET" | docker login "$REGISTRY" -u "$REGISTRY_USER" --password-stdin
-          docker build --build-arg BUILD_SHA="${{ github.sha }}" --build-arg BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" -t "$IMAGE" .
+          # On CRACI the job's CA certificate is passed into the build so npm trusts CRACI's proxy.
+          ca_args=()
+          if [ -f /usr/local/share/ca-certificates/craci.crt ]; then
+            ca_args=(--secret id=extra-ca,src=/usr/local/share/ca-certificates/craci.crt)
+          fi
+          docker build "${ca_args[@]}" --build-arg BUILD_SHA="${{ github.sha }}" --build-arg BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" -t "$IMAGE" .
           docker push "$IMAGE"
           digest="$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE")"
           echo "digest=${digest#*@}" >> "$GITHUB_OUTPUT"

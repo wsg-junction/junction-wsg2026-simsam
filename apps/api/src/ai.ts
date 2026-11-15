@@ -15,20 +15,61 @@ import { fetchIntros } from './wikipedia.js';
 
 // NVIDIA's hosted models speak the OpenAI chat completions API. NVIDIA_BASE_URL
 // points the chat model at another OpenAI-compatible server instead, e.g.
-// Nemotron served with vLLM or NIM on a Verda GPU instance
-// ("http://<instance>:8000/v1"). Unset, the NVIDIA API catalog is used.
-// Embeddings stay on the catalog either way (see embeddings.ts).
-const apiKey = process.env.NVIDIA_API_KEY;
-const baseURL = process.env.NVIDIA_BASE_URL?.trim() || 'https://integrate.api.nvidia.com/v1';
-const selfHosted = Boolean(process.env.NVIDIA_BASE_URL?.trim());
-const MODEL = process.env.NVIDIA_MODEL ?? 'nvidia/nemotron-3.5-super-vl-120b-a12b';
+// Nemotron served with vLLM on a Verda GPU container
+// ("https://containers.datacrunch.io/<name>/v1"), authenticated with
+// VERDA_INFERENCE_KEY and named by NVIDIA_MODEL. Unset, the NVIDIA API catalog
+// is used (NVIDIA_API_KEY).
+//
+// With both configured, Verda is tried first and the catalog is the fallback:
+// when the Verda server can't be reached, times out, errors (5xx) or refuses the
+// key or quota, the same request is sent to the catalog, and Verda is skipped
+// for a minute so a down server doesn't slow every request.
+// Embeddings stay on the catalog either way (see embeddings.ts); the catalog key
+// is never sent to the other server.
+const CATALOG_URL = 'https://integrate.api.nvidia.com/v1';
+const CATALOG_MODEL = 'nvidia/nemotron-3.5-super-vl-120b-a12b';
+const customURL = process.env.NVIDIA_BASE_URL?.trim();
+const selfHosted = Boolean(customURL);
+const catalogKey = process.env.NVIDIA_API_KEY?.trim();
+const MODEL = process.env.NVIDIA_MODEL?.trim() || CATALOG_MODEL;
 
-// A self-hosted server may not check keys; the SDK still needs a string.
-const client = apiKey || selfHosted ? new OpenAI({ apiKey: apiKey || 'not-needed', baseURL }) : null;
+// The Verda server may not check keys; the SDK still needs a string. Its requests
+// fail fast (the fallback takes over); the catalog gets the SDK's patience.
+const primary = selfHosted
+  ? new OpenAI({ apiKey: process.env.VERDA_INFERENCE_KEY?.trim() || 'not-needed', baseURL: customURL, timeout: 120_000, maxRetries: 1 })
+  : catalogKey
+    ? new OpenAI({ apiKey: catalogKey, baseURL: CATALOG_URL })
+    : null;
+const fallback = selfHosted && catalogKey ? new OpenAI({ apiKey: catalogKey, baseURL: CATALOG_URL }) : null;
+
+/** Whether an error says "this server is unavailable" (try the other) rather than "this request is wrong". */
+function serverUnavailable(err: unknown) {
+  const status = (err as { status?: number }).status;
+  return status === undefined || status >= 500 || [401, 403, 404, 408, 429].includes(status);
+}
+
+let primarySkippedUntil = 0;
+type Create = OpenAI['chat']['completions']['create'];
+const createWithFallback = (async (params: ChatCompletionCreateParams, options?: { signal?: AbortSignal }) => {
+  if (primary && !(fallback && Date.now() < primarySkippedUntil)) {
+    try {
+      return await primary.chat.completions.create(params as never, options);
+    } catch (err) {
+      if (!fallback || options?.signal?.aborted || !serverUnavailable(err)) throw err;
+      primarySkippedUntil = Date.now() + 60_000;
+      console.warn(`AI server ${aiEndpoint} failed (${(err as Error).message.slice(0, 120)}); using the NVIDIA API catalog for a minute.`);
+    }
+  }
+  return fallback!.chat.completions.create({ ...params, model: CATALOG_MODEL } as never, options);
+}) as unknown as Create;
+
+const client = primary ? { chat: { completions: { create: createWithFallback } } } : null;
 
 export const aiEnabled = client !== null;
 /** For the logs: where the chat model runs. */
-export const aiEndpoint = selfHosted ? new URL(baseURL).host : 'NVIDIA API catalog';
+export const aiEndpoint = selfHosted
+  ? `${new URL(customURL!).host}${fallback ? ' (fallback: NVIDIA API catalog)' : ''}`
+  : 'NVIDIA API catalog';
 
 const ANSWER_SYSTEM = `You are Atlas, a research assistant that answers questions from numbered Wikipedia excerpts.
 
@@ -212,8 +253,9 @@ export async function* streamAnswer(
 
   let announcedThinking = false;
   for await (const chunk of stream) {
-    const delta = chunk.choices[0]?.delta as { content?: string | null; reasoning_content?: string } | undefined;
-    if (delta?.reasoning_content && !announcedThinking) {
+    // vLLM names the reasoning field "reasoning_content" (older) or "reasoning" (newer).
+    const delta = chunk.choices[0]?.delta as { content?: string | null; reasoning_content?: string; reasoning?: string } | undefined;
+    if ((delta?.reasoning_content || delta?.reasoning) && !announcedThinking) {
       announcedThinking = true;
       yield { type: 'thinking' };
     }
@@ -641,11 +683,20 @@ let schemasAccepted = true;
  * to decode to that JSON schema (structured output, supported by NVIDIA's API,
  * NIM and vLLM), so the reply is always valid JSON; a server that refuses it
  * gets the plain request. Retries once when the reply can't be parsed.
+ *
+ * With `onText`, the reply is streamed and the text received so far is passed
+ * to it as it arrives (the JSON is still returned whole at the end).
  */
 export async function jsonCompletion<T>(
   system: string,
   user: string,
-  options: { maxTokens: number; temperature?: number; signal?: AbortSignal; schema?: { name: string; schema: object } },
+  options: {
+    maxTokens: number;
+    temperature?: number;
+    signal?: AbortSignal;
+    schema?: { name: string; schema: object };
+    onText?: (textSoFar: string) => void;
+  },
 ): Promise<T> {
   if (!client) throw new Error('AI is not configured');
   let lastError: unknown;
@@ -663,11 +714,24 @@ export async function jsonCompletion<T>(
       stream: false,
       chat_template_kwargs: { enable_thinking: false },
     };
-    let completion;
+    let content = '';
     try {
-      completion = await client.chat.completions.create(params as ChatCompletionCreateParams & { stream: false }, {
-        signal: options.signal,
-      });
+      if (options.onText) {
+        const stream = await client.chat.completions.create({ ...params, stream: true } as ChatCompletionCreateParams & { stream: true }, {
+          signal: options.signal,
+        });
+        for await (const chunk of stream) {
+          const delta = chunk.choices[0]?.delta?.content;
+          if (!delta) continue;
+          content += delta;
+          options.onText(content);
+        }
+      } else {
+        const completion = await client.chat.completions.create(params as ChatCompletionCreateParams & { stream: false }, {
+          signal: options.signal,
+        });
+        content = completion.choices[0]?.message?.content ?? '';
+      }
     } catch (err) {
       // A server without structured output: ask again without the schema.
       if (structured && (err as { status?: number }).status === 400 && !options.signal?.aborted) {
@@ -675,9 +739,13 @@ export async function jsonCompletion<T>(
         attempt--;
         continue;
       }
+      // A stream that broke part way is asked for again once.
+      if (options.onText && attempt === 0 && !options.signal?.aborted) {
+        lastError = err;
+        continue;
+      }
       throw err;
     }
-    const content = completion.choices[0]?.message?.content ?? '';
     const json = content
       .slice(content.indexOf('{'), content.lastIndexOf('}') + 1)
       // Citation-style source lists ("[1][3]") where a JSON array belongs.

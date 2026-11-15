@@ -48,6 +48,7 @@ import { searchWeb, webSearchEnabled } from './context.js';
 import { corpusArticles, corpusAvailable, corpusGraph, type CorpusGraph, relatedInCorpus, searchCorpus, type CorpusArticle, type CorpusHit, type RankedHit, type SearchCandidate } from './corpus.js';
 import { articleHistory } from './history.js';
 import { articleTimeline, revisionDiff } from './timeline.js';
+import { acquireMissing, prefetchArticles } from './acquire.js';
 import { storePhoto, storageEndpoint } from './storage.js';
 import { SpeechError, speechEnabled, synthesize, transcribe } from './speech.js';
 import { pool, migrate } from './db.js';
@@ -253,7 +254,8 @@ app.post<{ Body: { title: string } }>(
   },
   async (req, reply): Promise<ArticleTimeline | void> => {
     try {
-      const timeline = await articleTimeline(req.body.title, AbortSignal.timeout(90_000));
+      const [title] = await acquireMissing([req.body.title], 20_000);
+      const timeline = await articleTimeline(title, AbortSignal.timeout(90_000));
       if (!timeline) return reply.code(404).send({ error: 'This article isn’t in the local collection.' });
       return timeline;
     } catch (err) {
@@ -302,7 +304,10 @@ app.post<{ Body: { title: string; seeds?: string[]; about?: string } }>(
     },
   },
   async (req, reply): Promise<CorpusGraph | void> => {
-    const graph = await corpusGraph(req.body.title, req.body.seeds, req.body.about).catch((err) => {
+    // A center the collection lacks is fetched and stored first, so the map is built from the database.
+    const [center] = await acquireMissing([req.body.title], 15_000);
+    prefetchArticles(req.body.seeds ?? []);
+    const graph = await corpusGraph(center, req.body.seeds, req.body.about).catch((err) => {
       req.log.warn(err, 'graph failed');
       return null;
     });
@@ -338,12 +343,15 @@ app.post<{ Body: { query: string; limit?: number; candidates?: SearchCandidate[]
       },
     },
   },
-  async (req): Promise<{ results: RankedHit[] }> => ({
-    results: await searchCorpus(req.body.query, req.body.limit ?? 8, req.body.candidates).catch((err) => {
+  async (req): Promise<{ results: RankedHit[] }> => {
+    const results = await searchCorpus(req.body.query, req.body.limit ?? 8, req.body.candidates).catch((err) => {
       req.log.warn(err, 'corpus search failed');
-      return [];
-    }),
-  }),
+      return [] as RankedHit[];
+    });
+    // The top results the collection lacks are likely to be opened next: fetch and store them now.
+    prefetchArticles(results.filter((r) => !r.stored).slice(0, 4).map((r) => r.title));
+    return { results };
+  },
 );
 
 app.get<{ Querystring: { title: string; limit?: number } }>(
@@ -382,7 +390,12 @@ app.post<{ Body: { titles: string[] } }>(
       },
     },
   },
-  async (req): Promise<{ articles: (CorpusArticle | null)[] }> => ({ articles: await corpusArticles(req.body.titles) }),
+  async (req): Promise<{ articles: (CorpusArticle | null)[] }> => {
+    // Titles the collection lacks are fetched, embedded and stored first (waiting a few seconds at most),
+    // so the reader gets them from the database like any other article.
+    const titles = await acquireMissing(req.body.titles, 12_000);
+    return { articles: await corpusArticles(titles) };
+  },
 );
 
 // How an article changed over time, from its system-versioned history.
@@ -400,7 +413,8 @@ app.post<{ Body: { title: string } }>(
     },
   },
   async (req, reply): Promise<ArticleHistory | void> => {
-    const history = await articleHistory(req.body.title, AbortSignal.timeout(60_000));
+    const [title] = await acquireMissing([req.body.title], 20_000);
+    const history = await articleHistory(title, AbortSignal.timeout(60_000));
     if (!history) return reply.code(404).send({ error: 'That article’s history isn’t in the local collection.' });
     return history;
   },
@@ -684,7 +698,8 @@ app.post<{ Body: FactCheckRequest }>(
   async (req, reply): Promise<FactCheckReport | void> => {
     if (!factCheckEnabled) return reply.code(503).send({ error: 'Fact-checking is not configured' });
     try {
-      const report = await factCheck(req.body.title, AbortSignal.timeout(180_000));
+      const [title] = await acquireMissing([req.body.title], 15_000);
+      const report = await factCheck(title, AbortSignal.timeout(180_000));
       if (!report) return reply.code(404).send({ error: 'No Wikipedia article has this title.' });
       return report;
     } catch (err) {

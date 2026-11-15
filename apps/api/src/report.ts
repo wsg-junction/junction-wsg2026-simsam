@@ -14,6 +14,7 @@
 import type {
   DeepReport,
   DeepReportEvent,
+  EvidenceItem,
   MediaKind,
   ReportDataset,
   ReportEvent,
@@ -27,6 +28,67 @@ import { nearestPassages, type Passage } from './corpus.js';
 import { embedCached } from './embeddings.js';
 import { articleFigures, ensureMedia, kindLabel, nearestFigures, type Figure } from './media.js';
 import { fetchIntros, searchLiveTitles } from './wikipedia.js';
+import { prefetchArticles } from './acquire.js';
+import { noCitations, partialPart, partialString } from './partialJson.js';
+
+const evidence_ = (part: number, items: EvidenceItem[]): DeepReportEvent => ({ type: 'evidence', part, items });
+
+/** How often (at most) a part's draft text is sent while the model writes it. */
+const DRAFT_INTERVAL_MS = 250;
+
+/**
+ * Run `start` while yielding the events it emits (several writers report their
+ * drafts while they work), then return its result.
+ */
+async function* withEvents<T>(start: (emit: (event: DeepReportEvent) => void) => Promise<T>): AsyncGenerator<DeepReportEvent, T> {
+  const queue: DeepReportEvent[] = [];
+  let wake: (() => void) | null = null;
+  let done = false;
+  const work = start((event) => {
+    queue.push(event);
+    wake?.();
+  }).finally(() => {
+    done = true;
+    wake?.();
+  });
+  work.catch(() => {}); // surfaced by the await below, not as an unhandled rejection
+  for (;;) {
+    const next = queue.shift();
+    if (next) {
+      yield next;
+      continue;
+    }
+    if (done) break;
+    await new Promise<void>((resume) => (wake = resume));
+  }
+  return await work;
+}
+
+/** `fn` at most once per `ms` (the last call within a window is kept); `flush` sends any pending call now. */
+function throttled<A extends unknown[]>(ms: number, fn: (...args: A) => void) {
+  let last = 0;
+  let pending: A | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const send = () => {
+    timer = null;
+    if (!pending) return;
+    const args = pending;
+    pending = null;
+    last = Date.now();
+    fn(...args);
+  };
+  const call = (...args: A) => {
+    pending = args;
+    if (timer) return;
+    const wait = Math.max(0, last + ms - Date.now());
+    timer = setTimeout(send, wait);
+  };
+  call.flush = () => {
+    if (timer) clearTimeout(timer);
+    send();
+  };
+  return call;
+}
 
 const PASSAGES_PER_PART = 14;
 const FIGURES_PER_PART = 4;
@@ -194,6 +256,8 @@ async function writePart(
   part: Plan['parts'][number],
   evidence: Source[],
   signal: AbortSignal,
+  /** Called with the part's text so far as the model writes it. */
+  onDraft?: (draft: ReturnType<typeof partialPart>) => void,
 ): Promise<WrittenPart> {
   const valid = new Set(evidence.map((s) => s.n));
   const others = plan.parts.filter((p) => p.n !== part.n).map((p) => p.title).join('; ');
@@ -211,7 +275,13 @@ async function writePart(
       '',
       'JSON:',
     ].join('\n'),
-    { maxTokens: 5000, temperature: 0.3, signal, schema: { name: 'report_part', schema: PART_SCHEMA } },
+    {
+      maxTokens: 5000,
+      temperature: 0.3,
+      signal,
+      schema: { name: 'report_part', schema: PART_SCHEMA },
+      onText: onDraft ? (text) => onDraft(partialPart(text)) : undefined,
+    },
   );
 
   const sections = list(raw.sections)
@@ -362,6 +432,9 @@ export async function* deepReport(topic: string, wantWeb: boolean, signal: Abort
       stats.articles.add(p.title);
     }
     stats.passages += passages.length;
+    if (passages.length) {
+      yield evidence_(part.n, passages.map((p) => ({ kind: 'wikipedia', title: p.title, section: p.section ?? undefined, stored: true })));
+    }
 
     // Thin in the collection: add article leads from live Wikipedia.
     let liveCount = 0;
@@ -373,6 +446,8 @@ export async function* deepReport(topic: string, wantWeb: boolean, signal: Abort
       ].filter((t) => !passages.some((p) => p.title === t));
       const intros = await fetchIntros(titles.slice(0, 4), signal).catch(() => []);
       partLive.set(part.n, intros.flatMap((i) => (i ? [i.title] : [])));
+      // What the collection lacked is stored for next time.
+      prefetchArticles(intros.flatMap((i) => (i ? [i.title] : [])));
       for (const intro of intros) {
         if (!intro) continue;
         ids.push(
@@ -381,6 +456,7 @@ export async function* deepReport(topic: string, wantWeb: boolean, signal: Abort
         stats.live.add(intro.title);
         liveCount++;
       }
+      if (liveCount) yield evidence_(part.n, intros.flatMap((i) => (i ? [{ kind: 'wikipedia' as const, title: i.title, stored: false }] : [])));
     }
 
     const pages = await webResults[part.n - 1];
@@ -388,6 +464,7 @@ export async function* deepReport(topic: string, wantWeb: boolean, signal: Abort
       ids.push(book.add(`web:${w.url}`, { kind: 'web', title: w.title, url: w.url, site: w.site, text: clip(w.text, 1200) }));
       stats.web++;
     }
+    if (pages.length) yield evidence_(part.n, pages.map((w) => ({ kind: 'web' as const, title: w.title, site: w.site })));
     evidence.set(part.n, ids);
     yield step(
       `gather-${part.n}`,
@@ -408,6 +485,7 @@ export async function* deepReport(topic: string, wantWeb: boolean, signal: Abort
   const mainsOf = (n: number) => [...topTitles(partPassages.get(n) ?? [], 2), ...(partLive.get(n) ?? []).slice(0, 1)].slice(0, 2);
   const mains = [...new Set(plan.parts.flatMap((p) => mainsOf(p.n)))];
   for (let i = 0; i < mains.length; i += 4) {
+    yield step('figures', 'Reading figures: maps, charts, tables and infoboxes', false, `${mains.slice(i, i + 4).join(', ')} (${Math.min(i + 4, mains.length)} of ${mains.length} articles)`);
     await Promise.all(mains.slice(i, i + 4).map((t) => ensureMedia(t, AbortSignal.any([signal, AbortSignal.timeout(90_000)])).catch(() => 0)));
   }
   for (const part of plan.parts) {
@@ -439,6 +517,9 @@ export async function* deepReport(topic: string, wantWeb: boolean, signal: Abort
       );
       stats.figures++;
     }
+    if (picked.length) {
+      yield evidence_(part.n, picked.map((f) => ({ kind: 'figure' as const, title: f.title, mediaKind: f.kind as MediaKind })));
+    }
   }
   yield step('figures', 'Read the figures', true, `${stats.figures} figures`);
 
@@ -448,8 +529,18 @@ export async function* deepReport(topic: string, wantWeb: boolean, signal: Abort
   for (let i = 0; i < plan.parts.length; i += PARALLEL_WRITERS) {
     const batch = plan.parts.slice(i, i + PARALLEL_WRITERS);
     for (const part of batch) yield step(`write-${part.n}`, `Writing part ${part.n}: ${part.title}`, false);
-    const results = await Promise.allSettled(
-      batch.map((part) => writePart(topic, plan, part, (evidence.get(part.n) ?? []).map((n) => book.get(n)), signal)),
+    // The parts are written side by side; their text is streamed as the model writes it.
+    const results = yield* withEvents((emit) =>
+      Promise.allSettled(
+        batch.map((part) => {
+          const sendDraft = throttled(DRAFT_INTERVAL_MS, (d: ReturnType<typeof partialPart>) =>
+            emit({ type: 'draft', part: part.n, summary: d.summary, sections: d.sections }),
+          );
+          return writePart(topic, plan, part, (evidence.get(part.n) ?? []).map((n) => book.get(n)), signal, sendDraft).finally(() =>
+            sendDraft.flush(),
+          );
+        }),
+      ),
     );
     for (const [j, r] of results.entries()) {
       const part = batch[j];
@@ -484,7 +575,10 @@ export async function* deepReport(topic: string, wantWeb: boolean, signal: Abort
   let limitations = '';
   let eras: DeepReport['eras'] = [];
   try {
-    const raw = await jsonCompletion<Record<string, unknown>>(
+    // The abstract is streamed as it is written.
+    const raw: Record<string, unknown> = yield* withEvents((emit) => {
+      const sendAbstract = throttled(DRAFT_INTERVAL_MS, (text: string) => emit({ type: 'synthesis', abstract: text }));
+      return jsonCompletion<Record<string, unknown>>(
       synthSystem(web),
       [
         `Report: ${plan.title}`,
@@ -505,8 +599,15 @@ export async function* deepReport(topic: string, wantWeb: boolean, signal: Abort
         '',
         'JSON:',
       ].join('\n'),
-      { maxTokens: 3000, temperature: 0.3, signal, schema: { name: 'report_synthesis', schema: SYNTH_SCHEMA } },
-    );
+      {
+        maxTokens: 3000,
+        temperature: 0.3,
+        signal,
+        schema: { name: 'report_synthesis', schema: SYNTH_SCHEMA },
+        onText: (text) => sendAbstract(noCitations(partialString(text, 'abstract'))),
+      },
+      ).finally(() => sendAbstract.flush());
+    });
     abstract = keepCitations(str(raw.abstract, 2500), valid);
     answers = list(raw.answers)
       .map((a) => ({ question: Number(a.question), text: keepCitations(str(a.text, 2000), valid) }))

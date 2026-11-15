@@ -28,6 +28,9 @@ web (context.dev) only fill gaps.
 - **Fact-check** is a side panel beside Context: the claims in the page's main
   article checked against the web by Gemini (Google Search grounding), each with
   a verdict, a word-level comparison and sources. Only article text goes to Gemini.
+- **Nothing is ever "missing".** An article the collection lacks is fetched from
+  Wikipedia the moment something needs it, embedded and stored in MariaDB
+  (`acquire.ts`), so the reader never sees a gap or a different behaviour.
 - **History** shows only *substantial* changes (no typo/format fixes, bots,
   reverts, or vandalism that was reverted), with an AI overview, a per-section
   timeline, and a word-level diff per change so people can check it.
@@ -81,7 +84,7 @@ node --test scripts/*.test.mjs                # data-script tests
 | `DATABASE_URL` | default `mysql://simsam:simsam@localhost:3306/simsam` |
 | `NVIDIA_API_KEY` | chat model + embeddings (NVIDIA API catalog, OpenAI-compatible) |
 | `NVIDIA_MODEL` | default `nvidia/nemotron-3.5-super-vl-120b-a12b` (a vision model: it also reads figures) |
-| `NVIDIA_BASE_URL` | optional: run the chat/vision model on another OpenAI-compatible server (vLLM/NIM on Verda); unset = NVIDIA catalog. Embeddings stay on the catalog |
+| `NVIDIA_BASE_URL` + `VERDA_INFERENCE_KEY` | optional: run the chat/vision model on another OpenAI-compatible server (vLLM on Verda, e.g. `https://containers.datacrunch.io/<container>/v1`, model name as it serves it in `NVIDIA_MODEL`); unset = NVIDIA catalog. The catalog key is never sent to it. With `NVIDIA_API_KEY` also set, the catalog is the **fallback** (`ai.ts`: connection errors, timeouts, 5xx, 401/403/404/429 on the Verda server switch to the catalog model for a minute; not mid-stream). Embeddings stay on the catalog |
 | `GEMINI_API_KEY`, `GEMINI_MODEL` | the fact-checker (default model `gemini-flash-latest`) |
 | `NVIDIA_EMBEDDING_MODEL` | default `nvidia/nemotron-3.5-embed-1b` (1024 dims) |
 | `CONTEXT_DEV_API_KEY` | web search for the Context panel and Auto routing |
@@ -114,6 +117,13 @@ How history gets into the system-versioned table:
   `SET @@system_versioning_insert_history = 1` and explicit `row_start`/`row_end`
   (requires `secure_timestamp` to allow it; it does locally).
 
+On-demand articles and the vector index: an article inserted later on a topic far from
+the collection can be left out of the HNSW index's nearest-neighbour results (new nodes
+get no reverse links). `freshPages` in `corpus.ts` therefore scans the passages of
+`discovered_via = 'on-demand'` articles directly and merges them into `searchCorpus` and
+`nearestPassages`. Cheap for thousands of such articles; past that, rebuild the vector
+index (or re-run the ingest) so they join it.
+
 Vector notes: insert with `VEC_FromText('[...]')`; query with
 `ORDER BY VEC_DISTANCE_COSINE(embedding, VEC_FromText(?)) LIMIT n` so the index is
 used. Concurrent inserts into one HNSW index deadlock: ingest writes through a
@@ -126,6 +136,8 @@ map uses the small `article_vectors` index, not passages.
 |---|---|
 | `index.ts` | Fastify app, all routes, JSON schemas, rate limits, serves `apps/web/dist` in production |
 | `db.ts` | pool (UTC session time zone) + `migrate()` |
+| `store.ts` | storing one article: row, revisions in the system-versioned table, chunking, passage embeddings + article vector (shared by ingest and acquire) |
+| `acquire.ts` | on-demand fetch: a missing title is read from live Wikipedia, stored (`discovered_via = 'on-demand'`), chunked, embedded; deduplicated, 3 at a time; `acquireMissing` (waits a few s), `prefetchArticles` (background). Called by `/api/articles`, `/api/graph`, `/api/article-history`, `/api/history`, `/api/fact-check`; `/api/search` and deep reports prefetch the live results they surface |
 | `ingest.ts` | loads `data/wikipedia-en`: articles, history replay, chunking, embeddings (3 workers × 48), article vectors |
 | `embeddings.ts` | `embed` (retry/backoff, abortable), `embedSkippingRejected` (bisects 422 content-safety rejections), `embedCached` (in-memory, for interactive search) |
 | `articleVectors.ts` | mean article vectors, backfill |
@@ -133,7 +145,7 @@ map uses the small `article_vectors` index, not passages.
 | `wikipedia.ts` | live Wikipedia fallback (`fetchIntros` reads the corpus first), `wikiFetch`, `fetchArticleFigures` (images + captions, infobox, tables; stored wikitext first) |
 | `wikitext.ts` | minimal wikitext → sections / plain text / lead; `infoboxOf`, `tablesOf`, `imagesOf`, `expandTemplates` |
 | `ai.ts` | all model calls: answer stream, brief, rewrite, `planSources`, `routeQuestion`, context summary, history overview, `readFigure` (vision), `jsonCompletion` (structured output via `json_schema`, falls back if refused); `NVIDIA_BASE_URL` switch |
-| `report.ts` | deep research: plan → gather per part (`nearestPassages`, live Wikipedia, figures via `ensureMedia`, optional context.dev) → write parts (3 in parallel) → synthesis; event merge, citation renumbering |
+| `report.ts` | deep research: plan → gather per part (`nearestPassages`, live Wikipedia, figures via `ensureMedia`, optional context.dev) → write parts (3 in parallel) → synthesis; event merge, citation renumbering. **Streams its work** over SSE: `step`, `plan`, `evidence` (sources as found, per part), `draft` (a part's text as the model writes it, read out of the partial JSON by `partialJson.ts`, ≤4/s, citations left out until the end), `synthesis` (the abstract as written), then `report` |
 | `media.ts` | figures: `ensureMedia` (parse + vision once + embed + store, lazy or via `--media`), `articleFigures`, `nearestFigures` (used by `searchCorpus`) |
 | `factcheck.ts` | extract claims from the lead (Gemini); per claim gather evidence from Google Search via Gemini (only `groundingSupports` attributed to non-Wikipedia pages) and context.dev (`WIKIPEDIA_COPIES` excluded, verbatim copies dropped); a separate Gemini judge call decides on that evidence alone and must cite it; compare claim vs finding (`diff`); store in `fact_checks` |
 | `context.ts` | context.dev web search (highlights, excludes Wikipedia and social sites) |

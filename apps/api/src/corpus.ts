@@ -59,6 +59,26 @@ async function nearestArticles(vector: number[], limit: number, excludePageId?: 
   return [...best.values()].slice(0, limit);
 }
 
+/**
+ * Articles fetched on demand (acquire.ts) closest to a vector, by scanning their
+ * passages directly. MariaDB's vector index can leave a newly inserted article
+ * on a topic far from the rest of the collection out of its nearest-neighbour
+ * results, so those articles are searched here instead and merged in by the
+ * callers. Cheap while on-demand articles number in the thousands.
+ */
+async function freshPages(vector: number[], limit: number, maxDistance = MAX_DISTANCE): Promise<number[]> {
+  const [rows] = await pool
+    .query<RowDataPacket[]>(
+      `SELECT c.page_id, MIN(VEC_DISTANCE_COSINE(c.embedding, VEC_FromText(?))) AS distance
+       FROM article_chunks c JOIN articles a USING (page_id)
+       WHERE a.discovered_via = 'on-demand'
+       GROUP BY c.page_id ORDER BY distance`,
+      [vectorText(vector)],
+    )
+    .catch(() => [[] as RowDataPacket[]]);
+  return rows.filter((r) => Number(r.distance) <= maxDistance).slice(0, limit).map((r) => Number(r.page_id));
+}
+
 /** How much closer an article counts when the query names it by its full title. */
 const TITLE_BOOST = 0.1;
 
@@ -142,10 +162,11 @@ export async function searchCorpus(query: string, limit: number, candidates: Sea
       titlesNamedIn(query),
     ]);
     if (!vector) return [];
-    const [hits, figures] = await Promise.all([
+    const [hits, figures, fresh] = await Promise.all([
       nearestArticles(vector, limit * 2),
       // What charts, maps, infoboxes and tables show (article_media), next to the prose.
       nearestFigures(vector, limit * 2).catch(() => []),
+      freshPages(vector, limit),
     ]);
     for (const fig of figures) {
       const distance = fig.distance ?? 1;
@@ -164,6 +185,7 @@ export async function searchCorpus(query: string, limit: number, candidates: Sea
         : [[] as RowDataPacket[]];
     const toMeasure = [
       ...named.map((n) => n.pageId),
+      ...fresh,
       ...storedCandidates.map((r) => Number(r.page_id)),
     ].filter((id) => !hits.some((h) => h.pageId === id));
     if (toMeasure.length > 0) {
@@ -485,13 +507,40 @@ export interface Passage {
  */
 export async function nearestPassages(vector: number[], limit: number, perArticle = 2, maxDistance = 0.6): Promise<Passage[]> {
   const v = vectorText(vector);
-  const [rows] = await pool.query<RowDataPacket[]>(
-    `SELECT c.id, c.page_id, a.title, a.url, c.section, c.content, VEC_DISTANCE_COSINE(c.embedding, VEC_FromText(?)) AS distance
-     FROM article_chunks c JOIN articles a USING (page_id)
+  // Two steps: the vector index answers a plain ORDER BY distance LIMIT n (about
+  // 0.2 s), but not when the same query also joins articles and reads the text
+  // (a full scan of every passage, ~20 s). So find the nearest passages first,
+  // then read just those rows.
+  const [nearest] = await pool.query<RowDataPacket[]>(
+    `SELECT c.id, VEC_DISTANCE_COSINE(c.embedding, VEC_FromText(?)) AS distance
+     FROM article_chunks c
      ORDER BY VEC_DISTANCE_COSINE(c.embedding, VEC_FromText(?))
      LIMIT ?`,
     [v, v, limit * 5],
   );
+  const distanceOf = new Map(nearest.map((r) => [Number(r.id), Number(r.distance)]));
+  const [found] = nearest.length
+    ? await pool.query<RowDataPacket[]>(
+        `SELECT c.id, c.page_id, a.title, a.url, c.section, c.content
+         FROM article_chunks c JOIN articles a USING (page_id) WHERE c.id IN (?)`,
+        [nearest.map((r) => Number(r.id))],
+      )
+    : [[] as RowDataPacket[]];
+  const rows = found
+    .map((r) => ({ ...r, distance: distanceOf.get(Number(r.id)) ?? 1 }))
+    .sort((a, b) => a.distance - b.distance) as RowDataPacket[];
+  // Articles fetched on demand may be missing from the index's results (see freshPages).
+  const fresh = await freshPages(vector, limit, maxDistance);
+  if (fresh.length) {
+    const [extra] = await pool.query<RowDataPacket[]>(
+      `SELECT c.id, c.page_id, a.title, a.url, c.section, c.content, VEC_DISTANCE_COSINE(c.embedding, VEC_FromText(?)) AS distance
+       FROM article_chunks c JOIN articles a USING (page_id) WHERE c.page_id IN (?)`,
+      [v, fresh],
+    );
+    const have = new Set(rows.map((r) => Number(r.id)));
+    rows.push(...extra.filter((r) => !have.has(Number(r.id))));
+    rows.sort((a, b) => Number(a.distance) - Number(b.distance));
+  }
   const perPage = new Map<number, number>();
   const out: Passage[] = [];
   for (const r of rows) {

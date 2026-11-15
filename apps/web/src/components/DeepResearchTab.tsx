@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Button, Form, Input, Spinner, TextField } from '@heroui/react';
-import type { DeepReport } from '@simsam/models';
+import type { DeepReport, EvidenceItem } from '@simsam/models';
 import { DeepReportView } from './DeepReportView';
 
 /** A deep research in progress (or that failed). */
@@ -12,6 +12,12 @@ export type DeepRun =
       startedAt: number;
       plan?: { title: string; questions: string[]; parts: { n: number; title: string; focus: string }[] };
       steps: { id: string; label: string; done: boolean; detail?: string }[];
+      /** Sources found so far, by part number. */
+      evidence: Record<number, EvidenceItem[]>;
+      /** Each part's text so far, while the model writes it. */
+      drafts: Record<number, { summary: string; sections: { heading: string; text: string }[] }>;
+      /** The report's abstract so far. */
+      abstract?: string;
     }
   | { status: 'error'; topic: string; web: boolean; message: string };
 
@@ -169,7 +175,92 @@ function StartForm({
   );
 }
 
-function Progress({ run, onCancel }: { run: Extract<DeepRun, { status: 'running' }>; onCancel: () => void }) {
+type Running = Extract<DeepRun, { status: 'running' }>;
+
+const SOURCE_TAG: Record<string, string> = { chart: 'Chart', map: 'Map', diagram: 'Diagram', photo: 'Photo', infobox: 'Infobox', table: 'Table' };
+
+/** How a source found during the research is labelled. */
+function sourceTag(item: EvidenceItem) {
+  if (item.kind === 'web') return item.site ?? 'Web';
+  if (item.kind === 'figure') return SOURCE_TAG[item.mediaKind ?? 'photo'] ?? 'Figure';
+  return item.stored ? 'Collection' : 'Live Wikipedia';
+}
+
+/** A part's sources as they are found: a few shown, the rest one click away. */
+function EvidenceList({ items }: { items: EvidenceItem[] }) {
+  // One line per article/page: a part's passages often come from the same article.
+  const rows: { item: EvidenceItem; sections: string[] }[] = [];
+  for (const item of items) {
+    const row = rows.find((r) => r.item.kind === item.kind && r.item.title === item.title);
+    if (row) {
+      if (item.section && !row.sections.includes(item.section)) row.sections.push(item.section);
+    } else rows.push({ item, sections: item.section ? [item.section] : [] });
+  }
+  const line = ({ item, sections }: (typeof rows)[number]) => (
+    <li key={`${item.kind}-${item.title}`} className="flex items-baseline gap-2 text-sm motion-safe:animate-[sheet-in_160ms_ease-out]">
+      <span className="shrink-0 rounded-full bg-default px-2 py-px text-xs text-muted">{sourceTag(item)}</span>
+      <span className="min-w-0">
+        {item.title}
+        {sections.length > 0 && <span className="text-muted"> · {sections.slice(0, 2).join(', ')}</span>}
+      </span>
+    </li>
+  );
+  const SHOWN = 4;
+  return (
+    <div className="mt-2">
+      <ul className="flex flex-col gap-1">{rows.slice(0, SHOWN).map(line)}</ul>
+      {rows.length > SHOWN && (
+        <details className="mt-1">
+          <summary className="w-fit cursor-pointer rounded text-sm text-muted outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-focus">
+            and {rows.length - SHOWN} more sources
+          </summary>
+          <ul className="mt-1 flex flex-col gap-1">{rows.slice(SHOWN).map(line)}</ul>
+        </details>
+      )}
+    </div>
+  );
+}
+
+/** A part's text as the model writes it. While it is being written, the panel keeps the newest words in view. */
+function Draft({ draft, writing }: { draft: NonNullable<Running['drafts'][number]>; writing: boolean }) {
+  const box = useRef<HTMLDivElement>(null);
+  const length = draft.summary.length + draft.sections.reduce((n, s) => n + s.heading.length + s.text.length, 0);
+  useEffect(() => {
+    if (writing) box.current?.scrollTo({ top: box.current.scrollHeight });
+  }, [length, writing]);
+  const caret = (
+    <span aria-hidden className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[0.15em] bg-accent motion-safe:animate-pulse" />
+  );
+  const last = draft.sections.length - 1;
+  return (
+    <div
+      ref={box}
+      tabIndex={0}
+      aria-label="The text as it is being written"
+      className="mt-2 max-h-72 overflow-y-auto rounded-lg border border-separator bg-surface px-4 py-3 font-serif text-[0.98rem] leading-relaxed outline-none focus-visible:ring-2 focus-visible:ring-focus"
+    >
+      {draft.summary && (
+        <p className="font-medium">
+          {draft.summary}
+          {writing && last < 0 && caret}
+        </p>
+      )}
+      {draft.sections.map((s, i) => (
+        <div key={i} className="mt-3">
+          <h4 className="font-sans text-sm font-semibold">{s.heading}</h4>
+          {s.text.split(/\n{2,}/).map((para, j, paras) => (
+            <p key={j} className="mt-1 whitespace-pre-line">
+              {para}
+              {writing && i === last && j === paras.length - 1 && caret}
+            </p>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Progress({ run, onCancel }: { run: Running; onCancel: () => void }) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
@@ -179,18 +270,22 @@ function Progress({ run, onCancel }: { run: Extract<DeepRun, { status: 'running'
   const elapsed = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
   const stepOf = (id: string) => run.steps.find((s) => s.id === id);
   const current = [...run.steps].reverse().find((s) => !s.done);
+  const synthesis = stepOf('synthesis');
 
   return (
     <div className="h-full overflow-y-auto">
-      <div className="mx-auto flex max-w-2xl flex-col gap-6 px-4 py-12 sm:px-8" aria-busy>
+      <div className="mx-auto flex max-w-3xl flex-col gap-6 px-4 py-12 sm:px-8" aria-busy>
         <div>
           <p className="text-sm text-muted">
             Deep research{run.web ? ' with web sources' : ''}, {elapsed}
           </p>
           <h2 className="mt-1 font-serif text-3xl font-normal text-balance">{run.plan?.title ?? run.topic}</h2>
-          <p aria-live="polite" className="mt-3 inline-flex items-center gap-2 text-sm text-muted">
-            <Spinner size="sm" aria-hidden />
-            {current?.label ?? 'Starting'}…
+          <p aria-live="polite" className="mt-3 flex items-start gap-2 text-sm text-muted">
+            <Spinner size="sm" aria-hidden className="mt-0.5 shrink-0" />
+            <span>
+              {current?.label ?? 'Starting'}…
+              {current?.detail && <span className="block text-xs">{current.detail}</span>}
+            </span>
           </p>
         </div>
 
@@ -206,11 +301,13 @@ function Progress({ run, onCancel }: { run: Extract<DeepRun, { status: 'running'
             </div>
             <div>
               <h3 className="text-sm font-semibold">Parts</h3>
-              <ol className="mt-2 flex flex-col gap-3">
+              <ol className="mt-2 flex flex-col gap-5">
                 {run.plan.parts.map((p) => {
                   const gather = stepOf(`gather-${p.n}`);
                   const write = stepOf(`write-${p.n}`);
                   const state = write?.done ? 'written' : write ? 'writing' : gather?.done ? 'gathered' : gather ? 'searching' : 'waiting';
+                  const found = run.evidence[p.n] ?? [];
+                  const draft = run.drafts[p.n];
                   return (
                     <li key={p.n} className="flex gap-3">
                       <span aria-hidden className="mt-1.5 flex size-3 shrink-0 items-center justify-center">
@@ -222,7 +319,7 @@ function Progress({ run, onCancel }: { run: Extract<DeepRun, { status: 'running'
                           <span className="size-2.5 animate-pulse rounded-full bg-accent motion-reduce:animate-none" />
                         )}
                       </span>
-                      <div className="min-w-0">
+                      <div className="min-w-0 flex-1">
                         <p className="font-medium">
                           {p.n}. {p.title}
                         </p>
@@ -232,11 +329,32 @@ function Progress({ run, onCancel }: { run: Extract<DeepRun, { status: 'running'
                               waiting: 'Waiting',
                               searching: 'Searching the collection',
                               gathered: `Evidence gathered${gather?.detail ? `: ${gather.detail}` : ''}`,
-                              writing: 'Writing',
+                              writing: draft ? 'Writing now' : 'Starting to write',
                               written: `Written${write?.detail ? `: ${write.detail}` : ''}`,
                             }[state]
                           }
                         </p>
+                        {found.length > 0 &&
+                          (state === 'written' ? (
+                            // Once a part is written, its sources step back so the part being written stays in focus.
+                            <details className="mt-2">
+                              <summary className="w-fit cursor-pointer rounded text-sm text-muted outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-focus">
+                                Sources it drew on
+                              </summary>
+                              <EvidenceList items={found} />
+                            </details>
+                          ) : (
+                            <EvidenceList items={found} />
+                          ))}
+                        {draft && state === 'writing' && <Draft draft={draft} writing />}
+                        {draft && state === 'written' && (
+                          <details className="mt-2">
+                            <summary className="w-fit cursor-pointer rounded text-sm text-muted outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-focus">
+                              Read what was written
+                            </summary>
+                            <Draft draft={draft} writing={false} />
+                          </details>
+                        )}
                       </div>
                     </li>
                   );
@@ -244,6 +362,18 @@ function Progress({ run, onCancel }: { run: Extract<DeepRun, { status: 'running'
               </ol>
             </div>
           </>
+        )}
+
+        {run.abstract && (
+          <div>
+            <h3 className="text-sm font-semibold">Overview</h3>
+            <p className="mt-2 font-serif text-[1.02rem] leading-relaxed">
+              {run.abstract}
+              {synthesis && !synthesis.done && (
+                <span aria-hidden className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[0.15em] bg-accent motion-safe:animate-pulse" />
+              )}
+            </p>
+          </div>
         )}
 
         <div className="flex flex-col gap-2">

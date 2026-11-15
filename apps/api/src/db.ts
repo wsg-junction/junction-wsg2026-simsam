@@ -48,6 +48,9 @@ export async function migrate() {
     ) DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci
   `);
 
+  // Which articles came from the on-demand fetch (see acquire.ts) is looked up on every search.
+  await pool.query('ALTER TABLE articles ADD INDEX IF NOT EXISTS articles_via (discovered_via)');
+
   // The article's content, system-versioned. The current row is the latest
   // revision; history rows are earlier revisions. The ingest script replays
   // revisions at their original edit times, so ROW_START is when the edit was

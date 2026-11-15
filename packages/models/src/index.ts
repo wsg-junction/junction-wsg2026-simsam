@@ -377,7 +377,26 @@ export interface DeepReport {
 }
 
 /** Progress of a deep research run, streamed as server-sent events from POST /api/deep-report. */
+/** A source found while researching, shown as it is gathered (before the report numbers its citations). */
+export interface EvidenceItem {
+  kind: 'wikipedia' | 'figure' | 'web';
+  title: string;
+  section?: string;
+  /** Web pages: the site's domain. */
+  site?: string;
+  /** Wikipedia: whether the article is in the MariaDB collection. */
+  stored?: boolean;
+  /** Figures: chart, map, infobox, table... */
+  mediaKind?: MediaKind;
+}
+
 export type DeepReportEvent =
+  /** Sources just gathered for a part (the part's evidence grows over several of these). */
+  | { type: 'evidence'; part: number; items: EvidenceItem[] }
+  /** A part as the model writes it: the text so far (citations left out until it's finished). Each event replaces the last for that part. */
+  | { type: 'draft'; part: number; summary: string; sections: { heading: string; text: string }[] }
+  /** The report's abstract as it is written. */
+  | { type: 'synthesis'; abstract: string }
   | { type: 'step'; step: { id: string; label: string; done: boolean; detail?: string } }
   | { type: 'plan'; title: string; questions: string[]; parts: { n: number; title: string; focus: string }[] }
   | { type: 'report'; report: DeepReport }

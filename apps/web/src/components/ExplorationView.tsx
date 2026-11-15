@@ -91,7 +91,7 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave, initial
     deepAbort.current = controller;
     setMainTab('deep');
     setMobileTab('research');
-    let current: DeepRun = { status: 'running', topic, web, startedAt: Date.now(), steps: [] };
+    let current: DeepRun = { status: 'running', topic, web, startedAt: Date.now(), steps: [], evidence: {}, drafts: {} };
     setDeepRun(current);
     const update = (next: DeepRun) => {
       if (deepAbort.current !== controller) return;
@@ -104,6 +104,14 @@ export function ExplorationView({ initialSteps, snapshot, saved, onSave, initial
       (event) => {
         if (current.status !== 'running') return;
         if (event.type === 'plan') update({ ...current, plan: { title: event.title, questions: event.questions, parts: event.parts } });
+        // Sources found, and the text as the model writes it: shown live while the research runs.
+        if (event.type === 'evidence') {
+          update({ ...current, evidence: { ...current.evidence, [event.part]: [...(current.evidence[event.part] ?? []), ...event.items] } });
+        }
+        if (event.type === 'draft') {
+          update({ ...current, drafts: { ...current.drafts, [event.part]: { summary: event.summary, sections: event.sections } } });
+        }
+        if (event.type === 'synthesis') update({ ...current, abstract: event.abstract });
         if (event.type === 'step') {
           const steps = current.steps.some((x) => x.id === event.step.id)
             ? current.steps.map((x) => (x.id === event.step.id ? event.step : x))

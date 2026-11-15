@@ -3,6 +3,7 @@ import { Button } from '@heroui/react';
 import type { Exploration, ExplorationStep } from '@simsam/models';
 import { AtlasBackdrop } from './components/AtlasBackdrop';
 import { ExplorationView } from './components/ExplorationView';
+import { HealthView } from './components/HealthView';
 import { Opening } from './components/Opening';
 import { Brand, SavedList, Sidebar, type SavedState } from './components/Sidebar';
 import { deleteExploration, getExploration, listExplorations, saveExploration, updateExploration } from './lib/api';
@@ -12,6 +13,7 @@ import { ThemeToggle } from './theme';
 
 type View =
   | { kind: 'opening' }
+  | { kind: 'health' }
   | {
       kind: 'exploring';
       key: number;
@@ -78,7 +80,7 @@ export function App() {
 
   return (
     <div className="flex h-full flex-col md:flex-row">
-      <Sidebar {...listProps} onNew={() => go({ kind: 'opening' })} />
+      <Sidebar {...listProps} onNew={() => go({ kind: 'opening' })} onHealth={() => go({ kind: 'health' })} healthActive={view.kind === 'health'} />
 
       {/* Compact header on small screens */}
       <header className="flex shrink-0 items-center justify-between gap-2 border-b border-border bg-surface/80 px-4 py-1.5 backdrop-blur-sm md:hidden">
@@ -96,6 +98,9 @@ export function App() {
           <Button size="sm" variant="ghost" onPress={() => go({ kind: 'opening' })}>
             New
           </Button>
+          <Button size="sm" variant="ghost" aria-current={view.kind === 'health' ? 'page' : undefined} onPress={() => go({ kind: 'health' })}>
+            Health
+          </Button>
           <ThemeToggle />
         </div>
       </header>
@@ -108,10 +113,12 @@ export function App() {
       <main
         className={`relative min-h-0 flex-1 ${view.kind === 'opening' ? 'overflow-y-auto' : 'overflow-hidden'}`}
       >
-        <AtlasBackdrop dimmed={view.kind === 'exploring'} />
+        <AtlasBackdrop dimmed={view.kind !== 'opening'} />
         <div className="relative h-full">
           {view.kind === 'opening' ? (
             <Opening onExplore={explore} />
+          ) : view.kind === 'health' ? (
+            <HealthView />
           ) : (
             <ExplorationView
               key={view.key}

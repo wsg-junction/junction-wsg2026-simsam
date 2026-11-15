@@ -30,6 +30,9 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     concurrency: deploy
+    outputs:
+      # The pushed image's digest: the SBOM job asks CRACI for that image's SBOM.
+      digest: ${{ steps.image.outputs.digest }}
     env:
       REGISTRY: vccr.io/${{ vars.VERDA_PROJECT_ID }}
       IMAGE: vccr.io/${{ vars.VERDA_PROJECT_ID }}/simsam:${{ github.sha }}
@@ -45,13 +48,16 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build and push image
+        id: image
         env:
           REGISTRY_USER: ${{ secrets.VERDA_REGISTRY_USER }}
           REGISTRY_SECRET: ${{ secrets.VERDA_REGISTRY_SECRET }}
         run: |
           echo "$REGISTRY_SECRET" | docker login "$REGISTRY" -u "$REGISTRY_USER" --password-stdin
-          docker build -t "$IMAGE" .
+          docker build --build-arg BUILD_SHA="${{ github.sha }}" --build-arg BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" -t "$IMAGE" .
           docker push "$IMAGE"
+          digest="$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE")"
+          echo "digest=${digest#*@}" >> "$GITHUB_OUTPUT"
 
       - name: Set up SSH
         env:
@@ -72,3 +78,29 @@ jobs:
             && docker compose pull app \
             && docker compose up -d \
             && docker image prune -f"
+
+  # Record what the shipped image is made of (its SBOM) in the app: the Health page, MariaDB
+  # and search. CRACI builds that SBOM from every job that contributed to the image, and
+  # answers 409 until they have all finished, so this runs after the deploy job. Needs the
+  # repository variable APP_URL, the secrets SBOM_INGEST_TOKEN (the same value the server
+  # has) and CRACI_API_TOKEN, and CI_RUNNER=craci (the SBOM exists only for CRACI builds).
+  # A failure here never blocks anything.
+  sbom:
+    needs: deploy
+    if: vars.APP_URL != '' && vars.CI_RUNNER == 'craci'
+    runs-on: ${{ vars.CI_RUNNER }}
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+
+      - name: Record the image's SBOM
+        env:
+          APP_URL: ${{ vars.APP_URL }}
+          CRACI_SBOM_DIGEST: ${{ needs.deploy.outputs.digest }}
+          CRACI_API_TOKEN: ${{ secrets.CRACI_API_TOKEN }}
+          SBOM_INGEST_TOKEN: ${{ secrets.SBOM_INGEST_TOKEN }}
+        run: node scripts/publish-sbom.mjs

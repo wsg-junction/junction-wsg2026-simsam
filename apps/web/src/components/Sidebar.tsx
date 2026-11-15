@@ -14,6 +14,9 @@ interface Props {
   onNew: () => void;
   onOpen: (exploration: Exploration) => void;
   onDelete: (exploration: Exploration) => void;
+  /** Open the Health page (services and the software bill of materials). */
+  onHealth?: () => void;
+  healthActive?: boolean;
 }
 
 export function Brand() {
@@ -25,7 +28,7 @@ export function Brand() {
   );
 }
 
-export function SavedList({ saved, activeId, onOpen, onDelete }: Omit<Props, 'onNew'>) {
+export function SavedList({ saved, activeId, onOpen, onDelete }: Omit<Props, 'onNew' | 'onHealth' | 'healthActive'>) {
   if (saved.status === 'loading') {
     return (
       <div className="flex justify-center py-6">
@@ -98,9 +101,24 @@ export function Sidebar(props: Props) {
           <SavedList {...props} />
         </ScrollShadow>
       </div>
-      <div className="flex items-center justify-between px-2">
-        <span className="text-xs text-muted">Theme</span>
-        <ThemeToggle />
+      <div className="flex flex-col gap-2">
+        {props.onHealth && (
+          <button
+            type="button"
+            onClick={props.onHealth}
+            aria-current={props.healthActive ? 'page' : undefined}
+            className="flex items-center gap-2 rounded-md px-2 py-2 text-left text-sm outline-none hover:bg-default focus-visible:ring-2 focus-visible:ring-focus aria-[current=page]:bg-default"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden className="text-muted">
+              <path d="M3 12h4l3-8 4 16 3-8h4" />
+            </svg>
+            Health
+          </button>
+        )}
+        <div className="flex items-center justify-between px-2">
+          <span className="text-xs text-muted">Theme</span>
+          <ThemeToggle />
+        </div>
       </div>
     </nav>
   );

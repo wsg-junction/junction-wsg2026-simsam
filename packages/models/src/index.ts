@@ -15,6 +15,8 @@ export interface Health {
   factcheck: boolean;
   /** Whether searching by photo is available (POST /api/image-search): the vision model is configured. */
   image: boolean;
+  /** What is running: the commit it was built from and when (set by the build; absent in development). */
+  build?: { sha?: string; builtAt?: string };
 }
 
 /** A passage from a web page found by web search (context.dev), used as a source next to Wikipedia. */
@@ -465,4 +467,79 @@ export interface ImageSearchResponse {
   description: string;
   /** Whether the photo was also kept in object storage. */
   stored: boolean;
+}
+
+// ---------- Software bill of materials (the Health page) ----------
+
+export type SbomSeverity = 'critical' | 'high' | 'medium' | 'low' | 'unknown';
+
+/** A known vulnerability (OSV.dev) affecting a component in the SBOM. */
+export interface SbomVulnerability {
+  id: string;
+  summary: string;
+  severity: SbomSeverity;
+  /** The first version without the problem, when the advisory names one. */
+  fixedIn?: string;
+  published?: string;
+  aliases: string[];
+  url: string;
+}
+
+/** One component (package) the software is built from. */
+export interface SbomComponent {
+  purl: string;
+  name: string;
+  version: string;
+  ecosystem: string;
+  description?: string;
+  license?: string;
+  homepage?: string;
+  /** Listed directly by the project (otherwise it comes in through another package). */
+  direct: boolean;
+  /** Packages that pull this one in (a few). */
+  requiredBy: string[];
+  vulnerabilities: SbomVulnerability[];
+}
+
+/** One recorded SBOM: where it came from and what was in it. */
+export interface SbomBuild {
+  id: number;
+  /** Who produced it: "craci" (the build's own record), or another generator. */
+  source: string;
+  commit?: string;
+  run?: string;
+  createdAt: string;
+  ingestedAt: string;
+  components: number;
+  direct: number;
+  /** What the producer says about how complete the record is (CycloneDX compositions), if it says. */
+  completeness?: string;
+}
+
+/** A change between SBOMs, read from the system-versioned components table. */
+export interface SbomChange {
+  at: string;
+  kind: 'added' | 'removed' | 'upgraded' | 'downgraded';
+  name: string;
+  from?: string;
+  to?: string;
+}
+
+export interface SbomSummary {
+  /** The latest SBOM; null until one has been recorded. */
+  build: SbomBuild | null;
+  builds: SbomBuild[];
+  components: SbomComponent[];
+  licenses: { license: string; count: number }[];
+  ecosystems: { ecosystem: string; count: number }[];
+  vulnerabilities: Record<SbomSeverity, number> & { checkedAt?: string };
+  changes: SbomChange[];
+  /** How many components are embedded for search (the Health page's own search). */
+  embedded: number;
+}
+
+/** GET /api/sbom/search: components matching a question, by meaning (embeddings) and name. */
+export interface SbomSearchHit extends SbomComponent {
+  /** Cosine distance (lower is closer); absent for matches by name only. */
+  distance?: number;
 }

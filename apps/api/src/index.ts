@@ -49,6 +49,7 @@ import { corpusArticles, corpusAvailable, corpusGraph, type CorpusGraph, related
 import { articleHistory } from './history.js';
 import { articleTimeline, revisionDiff } from './timeline.js';
 import { acquireMissing, prefetchArticles } from './acquire.js';
+import { ingestSbom, latestSbomDocument, sbomIngestEnabled, sbomSummary, sbomTokenOk, SbomError, searchSbom, startVulnRefresh } from './sbom.js';
 import { storePhoto, storageEndpoint } from './storage.js';
 import { SpeechError, speechEnabled, synthesize, transcribe } from './speech.js';
 import { pool, migrate } from './db.js';
@@ -121,6 +122,7 @@ const app = Fastify({ logger: true, trustProxy: true });
 await app.register(cors);
 await app.register(rateLimit, { global: false });
 await migrate();
+startVulnRefresh();
 app.log.info({ model: aiEnabled ? aiEndpoint : 'off', factcheck: factCheckEnabled ? GEMINI_MODEL : 'off', photoStorage: storageEndpoint }, 'AI endpoints');
 
 /** Deep research reads the MariaDB collection, so it needs both the AI and the corpus. */
@@ -136,7 +138,74 @@ app.get('/api/health', async (): Promise<Health> => ({
   deep: await deepAvailable(),
   factcheck: factCheckEnabled,
   image: aiEnabled,
+  build: { sha: process.env.BUILD_SHA || undefined, builtAt: process.env.BUILD_TIME || undefined },
 }));
+
+// ---------- Software bill of materials (the Health page) ----------
+
+// What Atlas is built from: recorded from CRACI's SBOM of the build (see sbom.ts).
+app.get('/api/sbom', { config: { rateLimit: { max: 60, timeWindow: '1 minute' } } }, async () => sbomSummary());
+
+app.get('/api/sbom/download', async (_req, reply) => {
+  const document = await latestSbomDocument();
+  if (!document) return reply.code(404).send({ error: 'No SBOM has been recorded yet.' });
+  return reply
+    .header('Content-Type', 'application/vnd.cyclonedx+json')
+    .header('Content-Disposition', 'attachment; filename="atlas-sbom.cdx.json"')
+    .send(document);
+});
+
+// The SBOM searched by meaning, with the same embedding model as the Wikipedia passages.
+app.get<{ Querystring: { q: string; limit?: number } }>(
+  '/api/sbom/search',
+  {
+    config: { rateLimit: { max: 60, timeWindow: '1 minute' } },
+    schema: {
+      querystring: {
+        type: 'object',
+        required: ['q'],
+        properties: { q: { type: 'string', minLength: 1, maxLength: 300 }, limit: { type: 'integer', minimum: 1, maximum: 20 } },
+      },
+    },
+  },
+  async (req) => ({ results: await searchSbom(req.query.q, req.query.limit ?? 8) }),
+);
+
+// A CI step posts the build's SBOM (CycloneDX JSON, e.g. CRACI's record of the build) here.
+// Needs SBOM_INGEST_TOKEN on the server; without it the route is off.
+app.post<{ Body: unknown; Querystring: { source?: string; commit?: string; run?: string } }>(
+  '/api/sbom',
+  {
+    bodyLimit: 30 * 1024 * 1024,
+    config: { rateLimit: { max: 20, timeWindow: '1 minute' } },
+    schema: {
+      querystring: {
+        type: 'object',
+        properties: {
+          source: { type: 'string', maxLength: 40 },
+          commit: { type: 'string', maxLength: 64 },
+          run: { type: 'string', maxLength: 64 },
+        },
+      },
+    },
+  },
+  async (req, reply) => {
+    if (!sbomIngestEnabled) return reply.code(404).send({ error: 'Recording SBOMs is not enabled on this server.' });
+    if (!sbomTokenOk(req.headers.authorization)) return reply.code(401).send({ error: 'A valid token is required.' });
+    try {
+      const { build, duplicate } = await ingestSbom(JSON.stringify(req.body), {
+        source: req.query.source ?? 'craci',
+        commit: req.query.commit,
+        run: req.query.run,
+      });
+      return reply.code(duplicate ? 200 : 201).send({ build, duplicate });
+    } catch (err) {
+      if (err instanceof SbomError) return reply.code(400).send({ error: err.message });
+      req.log.error(err, 'recording the SBOM failed');
+      return reply.code(500).send({ error: 'The SBOM couldn’t be recorded.' });
+    }
+  },
+);
 
 // ---------- Search by photo ----------
 

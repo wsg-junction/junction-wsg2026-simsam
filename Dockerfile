@@ -10,6 +10,9 @@ RUN npm ci
 COPY . .
 RUN npm run build -w web
 
-ENV NODE_ENV=production PORT=3000
+# What is running: shown on the Health page.
+ARG BUILD_SHA=
+ARG BUILD_TIME=
+ENV NODE_ENV=production PORT=3000 BUILD_SHA=$BUILD_SHA BUILD_TIME=$BUILD_TIME
 EXPOSE 3000
 CMD ["npm", "start", "-w", "api"]

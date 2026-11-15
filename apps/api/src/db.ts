@@ -183,4 +183,76 @@ export async function migrate() {
       KEY fact_checks_revision (page_id, revision_id, position)
     ) DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci
   `);
+
+  // ---------- Software bill of materials (see sbom.ts) ----------
+
+  // Every SBOM recorded (from CRACI's build records or any CycloneDX file), with the
+  // document itself for download. The sha256 keeps one row per distinct document.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS sbom_builds (
+      id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      source VARCHAR(40) NOT NULL,
+      commit_sha VARCHAR(64) NULL,
+      run_id VARCHAR(64) NULL,
+      serial_number VARCHAR(120) NULL,
+      created_at DATETIME NOT NULL,
+      ingested_at DATETIME NOT NULL,
+      component_count INT UNSIGNED NOT NULL,
+      direct_count INT UNSIGNED NOT NULL,
+      completeness VARCHAR(255) NULL,
+      sha256 CHAR(64) NOT NULL,
+      document LONGTEXT COMPRESSED NOT NULL,
+      UNIQUE KEY sbom_builds_sha (sha256)
+    ) DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci
+  `);
+
+  // What the software is built from, system-versioned like the Wikipedia articles: a
+  // component that leaves the SBOM is deleted, so FOR SYSTEM_TIME AS OF '...' returns
+  // the dependency tree as it was, and the history rows are the upgrades, additions
+  // and removals between builds. One row per package version (purl).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS sbom_components (
+      purl VARCHAR(400) NOT NULL PRIMARY KEY,
+      name VARCHAR(255) NOT NULL,
+      version VARCHAR(120) NOT NULL,
+      ecosystem VARCHAR(30) NOT NULL,
+      description TEXT NULL,
+      license VARCHAR(255) NULL,
+      homepage VARCHAR(512) NULL,
+      direct TINYINT(1) NOT NULL DEFAULT 0,
+      required_by JSON NOT NULL,
+      content_hash CHAR(40) NOT NULL,
+      KEY sbom_components_name (name)
+    ) DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci
+      WITH SYSTEM VERSIONING
+  `);
+
+  // One embedding per component, so the SBOM is searched by meaning with the same
+  // model and index type as the Wikipedia passages.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS sbom_chunks (
+      id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      purl VARCHAR(400) NOT NULL,
+      content_hash CHAR(40) NOT NULL,
+      content TEXT NOT NULL,
+      embedding VECTOR(${EMBEDDING_DIMENSIONS}) NOT NULL,
+      UNIQUE KEY sbom_chunks_purl (purl),
+      VECTOR INDEX (embedding) M=8 DISTANCE=cosine
+    ) DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci
+  `);
+
+  // Known vulnerabilities (OSV.dev) of the components, refreshed daily.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS sbom_vulns (
+      purl VARCHAR(400) NOT NULL,
+      osv_id VARCHAR(60) NOT NULL,
+      summary VARCHAR(1000) NOT NULL,
+      severity ENUM('critical', 'high', 'medium', 'low', 'unknown') NOT NULL,
+      fixed_in VARCHAR(120) NULL,
+      published DATETIME NULL,
+      aliases JSON NOT NULL,
+      checked_at DATETIME NOT NULL,
+      PRIMARY KEY (purl, osv_id)
+    ) DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci
+  `);
 }

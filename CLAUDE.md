@@ -31,6 +31,11 @@ web (context.dev) only fill gaps.
 - **Nothing is ever "missing".** An article the collection lacks is fetched from
   Wikipedia the moment something needs it, embedded and stored in MariaDB
   (`acquire.ts`), so the reader never sees a gap or a different behaviour.
+- **Health** (linked at the bottom of the left navigation) shows the services and
+  Atlas's own software bill of materials (SBOM): what it is built from, from
+  CRACI's record of the build. The SBOM lives in MariaDB like the articles
+  (versioned history, embeddings, search by meaning), apart from the Wikipedia
+  collection: its components never appear in research pages or Wikipedia search.
 - **History** shows only *substantial* changes (no typo/format fixes, bots,
   reverts, or vandalism that was reverted), with an AI overview, a per-section
   timeline, and a word-level diff per change so people can check it.
@@ -89,6 +94,7 @@ node --test scripts/*.test.mjs                # data-script tests
 | `NVIDIA_EMBEDDING_MODEL` | default `nvidia/nemotron-3.5-embed-1b` (1024 dims) |
 | `CONTEXT_DEV_API_KEY` | web search for the Context panel and Auto routing |
 | `ELEVENLABS_API_KEY` (+ `_VOICE_ID`, `_MODEL_ID`, `_STT_MODEL_ID`) | read-aloud and voice questions |
+| `SBOM_INGEST_TOKEN` | optional: lets CI record the build's SBOM with `POST /api/sbom` (same value as the repo secret); the route is off without it |
 | `WIKIPEDIA_USER_AGENT` | server-side Wikipedia requests (generic default) |
 
 Never print `.env` values; refer to variables by name. Every feature degrades
@@ -108,6 +114,10 @@ gracefully when its key is missing (`GET /api/health` reports `ai`, `voice`,
 | `history_reports` | cached history-panel report per article, reused until a newer revision exists |
 | `article_media` | figures per article: infobox and tables (parsed from wikitext) and images read once by the vision model (chart/map/diagram/photo), each with `embedding VECTOR(1024)` + its own cosine index; `source_key` = file name, "infobox", "table n" |
 | `article_media_scans` | which revision's figures were read (so each image goes through the vision model once) |
+| `sbom_builds` | each recorded SBOM (any CycloneDX JSON; source, commit, run, completeness) with the document itself (`LONGTEXT COMPRESSED`); `sha256` makes a repeat a no-op |
+| `sbom_components` | **`WITH SYSTEM VERSIONING`**: the components (one row per purl, i.e. per package version). A component that leaves is DELETEd, so `FOR SYSTEM_TIME AS OF` returns the tree as it was and the history rows are the upgrades/additions/removals (read by `changes()` in `sbom.ts`) |
+| `sbom_chunks` | one embedding per component (`VECTOR(1024)` + cosine index), same model as the passages |
+| `sbom_vulns` | OSV.dev advisories per component (severity, fix version), refreshed daily |
 | `fact_checks` | fact-check verdicts, PK (page_id, claim_hash, revision_id); reused until the article has a newer revision |
 
 How history gets into the system-versioned table:
@@ -138,6 +148,7 @@ map uses the small `article_vectors` index, not passages.
 | `db.ts` | pool (UTC session time zone) + `migrate()` |
 | `store.ts` | storing one article: row, revisions in the system-versioned table, chunking, passage embeddings + article vector (shared by ingest and acquire) |
 | `acquire.ts` | on-demand fetch: a missing title is read from live Wikipedia, stored (`discovered_via = 'on-demand'`), chunked, embedded; deduplicated, 3 at a time; `acquireMissing` (waits a few s), `prefetchArticles` (background). Called by `/api/articles`, `/api/graph`, `/api/article-history`, `/api/history`, `/api/fact-check`; `/api/search` and deep reports prefetch the live results they surface |
+| `sbom.ts` | the SBOM: `parseSbom`/`ingestSbom` (CycloneDX → versioned components, embeddings, then OSV lookup in the background), `sbomSummary`, `searchSbom` (vector index + exact-name boost; names are never substring-matched), `refreshVulns`/`startVulnRefresh` (OSV.dev), `sbomTokenOk`. `sbom-cli.ts` loads a file by hand. In CI: the deploy job outputs the pushed image's digest; the `sbom` job after it runs `scripts/publish-sbom.mjs`, which fetches CRACI's image SBOM (`GET api.craci.com/v1experimental1/sbom/oci_manifest?digest=`, 409 until all contributing jobs finish, so it retries) and POSTs it to `/api/sbom` (`npm run sbom -w api -- file.cdx.json`) |
 | `ingest.ts` | loads `data/wikipedia-en`: articles, history replay, chunking, embeddings (3 workers × 48), article vectors |
 | `embeddings.ts` | `embed` (retry/backoff, abortable), `embedSkippingRejected` (bisects 422 content-safety rejections), `embedCached` (in-memory, for interactive search) |
 | `articleVectors.ts` | mean article vectors, backfill |
@@ -153,7 +164,7 @@ map uses the small `article_vectors` index, not passages.
 | `history.ts` | older "How has this article changed?" history *page* from stored versions |
 | `speech.ts` | ElevenLabs TTS (`/api/speech`) and Scribe STT (`/api/transcribe`) |
 
-Routes: `/api/health`, `/api/search` (hybrid, takes live `candidates`),
+Routes: `/api/health` (also `build`: commit and build time from the image), `/api/sbom`, `/api/sbom/search`, `/api/sbom/download`, `POST /api/sbom` (CI posts the SBOM; bearer `SBOM_INGEST_TOKEN`, off without it), `/api/search` (hybrid, takes live `candidates`),
 `/api/related`, `/api/articles`, `/api/graph`, `/api/history`,
 `/api/article-history` (+ `/diff`), `/api/rewrite`, `/api/plan`, `/api/route`,
 `/api/answer` (SSE), `/api/deep-report` (SSE), `/api/fact-check`, `/api/brief`, `/api/context`, `/api/speech`,
@@ -206,6 +217,7 @@ Calibrated cosine distances (best passage): ≤0.45 reliably on topic, 0.45–0.
 | `components/TimelineExplorer.tsx` | zoomable timeline: lanes per part, eras, drag/wheel/pinch/keyboard, importance-based detail and collision-free labels |
 | `components/ContextPanel.tsx` | web context results (no input of its own) |
 | `components/FactCheckPanel.tsx` | verdict counts, claims with verdict (icon + label), Wikipedia vs web word comparison, sources |
+| `components/HealthView.tsx` | the Health page: services, supply-chain stats, vulnerabilities, "ask the bill of materials" (search), changes (from the versioned table), all components; `lib/sbom.ts` is its client |
 | `components/HistoryPanel.tsx` | AI overview, section timeline, changes with diffs |
 | `components/GraphPanel.tsx`, `TopicGraph.tsx` | topic map: d3-force network, pan/zoom/drag, collision-free labels |
 | `components/VoiceControls.tsx` | push-to-talk + hands-free (`lib/handsfree.ts`, `lib/voice.ts`) |

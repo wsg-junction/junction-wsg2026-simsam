@@ -197,6 +197,29 @@ image, pushes it to Verda's registry (`vccr.io`), then SSHes into a Verda instan
 and runs `docker compose up -d` with `deploy/compose.yml`. The API serves the built
 frontend; Caddy sits in front and serves it over HTTPS at `DOMAIN`.
 
+### Health page and the SBOM
+
+The **Health** link at the bottom of the left navigation shows which services are
+on, the commit that is running, and Atlas's own software bill of materials (SBOM):
+every package it is built from, with licenses, known vulnerabilities (OSV.dev), the
+changes between builds, and a search box that finds components by meaning. The SBOM
+is stored in MariaDB (a system-versioned table, embeddings, a vector index), so it is
+searched with the same machinery as the Wikipedia articles.
+
+On CRACI the SBOM is the build's own record, fetched from CRACI's API
+(`GET /v1experimental1/sbom/oci_manifest?digest=…`: the SBOM of the pushed image,
+built from every job that contributed to it). The deploy job outputs the image digest
+and an `sbom` job after it (CRACI answers 409 until all contributing jobs have
+finished) runs `scripts/publish-sbom.mjs`, which posts it to `/api/sbom`. Set it up once:
+
+1. Server: add `SBOM_INGEST_TOKEN=<long random string>` to `/opt/simsam/.env`.
+2. GitHub, secrets: `SBOM_INGEST_TOKEN` (same value) and `CRACI_API_TOKEN`
+   (CRACI → Settings → API tokens). Variables: `APP_URL` (e.g. `https://your.domain`)
+   and `CI_RUNNER=craci` (the SBOM exists only for builds that ran on CRACI).
+3. Push to `main`: after the deploy, the Health page shows the image's SBOM.
+
+To load one by hand (any CycloneDX JSON): `npm run sbom -w api -- sbom.cdx.json`.
+
 ### Choosing the CI runner
 
 The workflow runs on GitHub's hosted runners by default. To run it on

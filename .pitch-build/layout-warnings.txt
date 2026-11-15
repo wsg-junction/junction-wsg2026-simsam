@@ -1,0 +1,33 @@
+Slide 1: box=844x21.81095 text=430.875x74.4 What is Java?
+Slide 1: box=830x21.81095 text=343.21x51.6 Java is Taco Bell.
+Slide 1: box=840x21.81095 text=547.25x51.6 Now serving potato tacos.
+Slide 1: box=820x21.81095 text=411.14x26.4 A confident answer. A citation. Still wrong.
+Slide 2: box=845x21.81095 text=524.0551x46.8 A citation is a starting point
+Slide 2: box=820x21.81095 text=389x27.6 Three questions behind every answer
+Slide 2: box=150x21.81095 text=55.62504x48 01
+Slide 2: box=245x21.81095 text=219.625x30 What supports it?
+Slide 2: box=150x21.81095 text=55.62504x48 02
+Slide 2: box=245x21.81095 text=212.5x60 Do other sources agree?
+Slide 2: box=150x21.81095 text=55.62504x48 03
+Slide 2: box=245x21.81095 text=193x30 What changed?
+Slide 3: box=350x21.81095 text=251.97x57.6 Meet Atlas
+Slide 3: box=320x21.81095 text=267.33x30 Your research assistant
+Slide 3: box=330x21.81095 text=284.375x27.6 Ask. Explore. Investigate.
+Slide 4: box=850x21.81095 text=623x42 Check the claim. Inspect the change.
+Slide 4: box=410x21.81095 text=296.75x27.6 Independent fact-checking
+Slide 4: box=410x21.81095 text=265.25x27.6 Readable article history
+Slide 5: box=510x21.81095 text=471.25x93.6 Some questions deserveDeep Research
+Slide 5: box=485x21.81095 text=319.685x26.4 Powered by NVIDIA Nemotron
+Slide 5: box=450x21.81095 text=227.875x30 Interactive timelines
+Slide 5: box=470x21.81095 text=319.5x30 Figures and source citations
+Slide 5: box=470x21.81095 text=267.875x30 Findings and limitations
+Slide 6: box=850x21.81095 text=584.5x44.4 Evidence across topics and time
+Slide 6: box=380x21.81095 text=186.375x51.6 MariaDB
+Slide 6: box=380x21.81095 text=315x86.4 Semantic searchVersioned article historyStored research and sources
+Slide 6: box=380x21.81095 text=198.395x27.6 NVIDIA Nemotron
+Slide 6: box=380x21.81095 text=133.875x27.6 ElevenLabs
+Slide 6: box=380x21.81095 text=133.75x27.6 context.dev
+Slide 6: box=380x21.81095 text=84.25x27.6 Gemini
+Slide 7: box=820x21.81095 text=467.5x54 Start with a question.
+Slide 7: box=860x21.81095 text=580x54 Leave with understanding.
+Slide 7: box=720x21.81095 text=326.75x30 Atlas. Follow the evidence.

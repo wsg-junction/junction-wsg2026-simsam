@@ -5,9 +5,14 @@ on:
     branches: [main]
   pull_request:
 
+# Where the jobs run is one setting: the repository variable CI_RUNNER
+# (Settings > Secrets and variables > Actions > Variables).
+#   unset          GitHub-hosted runners (ubuntu-latest)
+#   craci          CRACI runners (the "Set up CRACI" step then provides Docker and ssh)
+# Any other runner label works too.
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -23,13 +28,20 @@ jobs:
   deploy:
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     concurrency: deploy
     env:
       REGISTRY: vccr.io/${{ vars.VERDA_PROJECT_ID }}
       IMAGE: vccr.io/${{ vars.VERDA_PROJECT_ID }}/simsam:${{ github.sha }}
       DEPLOY_TARGET: ${{ vars.DEPLOY_USER }}@${{ vars.DEPLOY_HOST }}
     steps:
+      # CRACI runners need this for a full GitHub-style image with Docker and ssh.
+      - name: Set up CRACI
+        if: vars.CI_RUNNER == 'craci'
+        uses: cracicorp/setup@v1
+        with:
+          image: ubuntu-24.04
+
       - uses: actions/checkout@v4
 
       - name: Build and push image

@@ -190,12 +190,27 @@ from the two stored versions in MariaDB) to check it against.
 Asking "How has this article changed over time?" still makes a history page
 from the stored versions in `article_content FOR SYSTEM_TIME ALL`.
 
-## Deployment (Verda + GitHub Actions)
+## Deployment (Verda + GitHub Actions or CRACI)
 
 On push to `main`, `.github/workflows/ci.yml` builds and tests, builds the Docker
 image, pushes it to Verda's registry (`vccr.io`), then SSHes into a Verda instance
 and runs `docker compose up -d` with `deploy/compose.yml`. The API serves the built
 frontend; Caddy sits in front and serves it over HTTPS at `DOMAIN`.
+
+### Choosing the CI runner
+
+The workflow runs on GitHub's hosted runners by default. To run it on
+CRACI instead, install the CRACI GitHub App (CRACI → Settings
+→ Builds → Install GitHub App) and set one repository variable; to switch back,
+delete it (or set it to another runner label):
+
+```sh
+gh variable set CI_RUNNER --body craci   # use CRACI
+gh variable delete CI_RUNNER             # use GitHub-hosted runners (ubuntu-latest)
+```
+
+Nothing else changes: the deploy job adds CRACI's setup step (Docker and ssh)
+only when `CI_RUNNER` is `craci`.
 
 ### One-time setup
 

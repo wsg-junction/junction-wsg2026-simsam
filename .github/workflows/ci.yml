@@ -31,7 +31,6 @@ jobs:
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     concurrency: deploy
     outputs:
-      # The pushed image's digest: the SBOM job asks CRACI for that image's SBOM.
       digest: ${{ steps.image.outputs.digest }}
     env:
       REGISTRY: vccr.io/${{ vars.VERDA_PROJECT_ID }}
@@ -89,19 +88,21 @@ jobs:
             && docker compose up -d \
             && docker image prune -f"
 
-  # Record what the shipped image is made of (its SBOM) in the app: the Health page, MariaDB
-  # and search. CRACI builds that SBOM from every job that contributed to the image, and
-  # answers 409 until they have all finished, so this runs after the deploy job. Needs the
-  # repository variable APP_URL, the secrets SBOM_INGEST_TOKEN (the same value the server
-  # has) and CRACI_API_TOKEN, and CI_RUNNER=craci (the SBOM exists only for CRACI builds).
+  # Record what the shipped image is made of (its SBOM) in the app: the Health page,
+  # MariaDB and search. Generates the SBOM from the image with syft (CycloneDX JSON),
+  # then posts it to the running app. Needs APP_URL and SBOM_INGEST_TOKEN.
   # A failure here never blocks anything.
   sbom:
     needs: deploy
-    if: vars.APP_URL != '' && vars.CI_RUNNER == 'craci'
-    runs-on: ${{ vars.CI_RUNNER }}
+    if: vars.APP_URL != ''
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     continue-on-error: true
+    env:
+      REGISTRY: vccr.io/${{ vars.VERDA_PROJECT_ID }}
+      IMAGE: vccr.io/${{ vars.VERDA_PROJECT_ID }}/simsam:${{ github.sha }}
     steps:
       - name: Set up CRACI
+        if: vars.CI_RUNNER == 'craci'
         uses: cracicorp/setup@v1
         with:
           image: ubuntu-24.04
@@ -112,12 +113,20 @@ jobs:
         with:
           node-version: 26
 
-      - name: Record the image's SBOM
+      - name: Log in to registry
+        env:
+          REGISTRY_USER: ${{ secrets.VERDA_REGISTRY_USER }}
+          REGISTRY_SECRET: ${{ secrets.VERDA_REGISTRY_SECRET }}
+        run: echo "$REGISTRY_SECRET" | docker login "$REGISTRY" -u "$REGISTRY_USER" --password-stdin
+
+      - name: Generate SBOM from image
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+          syft "$IMAGE" -o cyclonedx-json > sbom.cdx.json
+
+      - name: Record the SBOM
         env:
           APP_URL: ${{ vars.APP_URL }}
-          CRACI_SBOM_DIGEST: ${{ needs.deploy.outputs.digest }}
-          CRACI_API_TOKEN: ${{ secrets.CRACI_API_TOKEN }}
+          SBOM_FILE: sbom.cdx.json
           SBOM_INGEST_TOKEN: ${{ secrets.SBOM_INGEST_TOKEN }}
-        run: |
-          export CRACI_API_TOKEN="${CRACI_API_TOKEN:-$CRACI_TOKEN}"
-          node scripts/publish-sbom.mjs
+        run: node scripts/publish-sbom.mjs
